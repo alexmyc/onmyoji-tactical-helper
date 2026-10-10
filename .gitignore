@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyd
+*.c
+build/
+src_backup/
+
+*.pt
+*.gguf
+best.pt
+gemma-4-E2B-it-Q4_K_M.gguf
+
+cache_db.enc
+*.log
+.env
+
+*.bat
