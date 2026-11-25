@@ -87,7 +87,8 @@ class ShikigamiRepository:
             return dict(DEFAULT_TAG_METADATA)
 
         prio_raw = matched_data.get("priority", matched_data.get("static_priority", 5))
-        prio = int(prio_raw) if str(prio_raw).isdigit() else 5
+        prio_str = str(prio_raw)
+        prio = int(prio_str) if prio_str.isdigit() else 5
         role_tag = str(matched_data.get("role", matched_data.get("tag", "一般單位")) or "一般單位")
 
         prio_roles = matched_data.get("priority_target_roles", {})

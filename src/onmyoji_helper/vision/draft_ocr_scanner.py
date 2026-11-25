@@ -5,6 +5,7 @@ Encapsulates RapidOCR lazy initialization (DirectML/CPU memory-isolated, `use_cl
 stitching, and localized motion-diff throttling without import-time side effects.
 """
 
+import logging
 import time
 from collections.abc import Callable
 from typing import Any
@@ -12,9 +13,24 @@ from typing import Any
 import cv2
 import numpy as np
 
+logger = logging.getLogger("OnmyojiHelper")
+
 MIN_OPP_ROI_WIDTH: int = 500
 OCR_FALLBACK_INTERVAL: float = 3.0
 IN_BATTLE_DIFF_INTERVAL: float = 4.5
+DEFAULT_MIN_OCR_CONFIDENCE: float = 0.65
+
+
+def _passes_confidence(res: Any, min_confidence: float) -> bool:
+    """Returns True if a RapidOCR tuple `(box, text, score)` meets `min_confidence`."""
+    if min_confidence <= 0.0:
+        return True
+    if not isinstance(res, (list, tuple)) or len(res) < 3 or res[2] is None:
+        return True
+    try:
+        return float(res[2]) >= min_confidence
+    except (TypeError, ValueError):
+        return True
 
 
 def get_downsampled_blur(img_gray: np.ndarray | None) -> np.ndarray | None:
@@ -28,9 +44,14 @@ def get_downsampled_blur(img_gray: np.ndarray | None) -> np.ndarray | None:
 class DraftOcrScanner:
     """Performs motion-throttled dual-column RapidOCR scanning for Ban/Pick & settlement screens."""
 
-    def __init__(self, ocr_callable: Callable[[np.ndarray], tuple[Any, Any]] | None = None) -> None:
-        """Initializes motion-diff buffers and optional injectable OCR backend (for unit testing)."""
+    def __init__(
+        self,
+        ocr_callable: Callable[[np.ndarray], tuple[Any, Any]] | None = None,
+        min_confidence: float = DEFAULT_MIN_OCR_CONFIDENCE,
+    ) -> None:
+        """Initializes motion-diff buffers, OCR confidence gate, and optional injectable OCR backend."""
         self._ocr_engine: Callable[[np.ndarray], tuple[Any, Any]] | None = ocr_callable
+        self.min_confidence: float = float(min_confidence)
         self.prev_opp_small_blur: np.ndarray | None = None
         self.prev_my_small_blur: np.ndarray | None = None
         self.last_ocr_time: float = 0.0
@@ -65,6 +86,7 @@ class DraftOcrScanner:
         has_locked_opp_ban: bool,
         in_battle_five_picks: bool,
         now: float | None = None,
+        min_confidence: float | None = None,
     ) -> tuple[list[Any], list[Any], bool]:
         """Scans ally and opponent draft columns (or lightweight settlement ROI in battle).
 
@@ -134,6 +156,7 @@ class DraftOcrScanner:
         self.prev_opp_small_blur = curr_opp_small_blur
         self.last_ocr_time = now_ts
 
+        conf_thresh = self.min_confidence if min_confidence is None else float(min_confidence)
         ocr_opp: list[Any] = []
         ocr_my: list[Any] = []
         h_opp, w_opp = roi_opp_color.shape[:2] if roi_opp_color.ndim >= 2 else (0, 0)
@@ -151,7 +174,12 @@ class DraftOcrScanner:
                     settle_img = roi_opp_color
                 ocr_settle, _ = ocr_fn(settle_img)
                 if ocr_settle:
-                    ocr_opp = list(ocr_settle)
+                    ocr_opp = [r for r in ocr_settle if _passes_confidence(r, conf_thresh)]
+                    dropped = len(ocr_settle) - len(ocr_opp)
+                    if dropped > 0:
+                        logger.debug(
+                            f"[DraftOcrScanner] Filtered {dropped} low-confidence settlement OCR boxes (< {conf_thresh:.2f})."
+                        )
             return ocr_opp, ocr_my, True
 
         self.prev_my_small_blur = curr_my_small_blur
@@ -182,12 +210,20 @@ class DraftOcrScanner:
 
             ocr_combined, _ = ocr_fn(combined_roi)
             if ocr_combined:
+                dropped = 0
                 for res in ocr_combined:
+                    if not _passes_confidence(res, conf_thresh):
+                        dropped += 1
+                        continue
                     box = res[0]
                     x_center = sum(pt[0] for pt in box) / 4.0
                     if x_center < x_border:
                         ocr_my.append(res)
                     else:
                         ocr_opp.append(res)
+                if dropped > 0:
+                    logger.debug(
+                        f"[DraftOcrScanner] Filtered {dropped} low-confidence draft OCR boxes (< {conf_thresh:.2f})."
+                    )
 
         return ocr_opp, ocr_my, True

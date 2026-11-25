@@ -3,12 +3,13 @@ name: CI
 on:
   push:
     branches: [main, master]
+    tags: ["v*"]
   pull_request:
     branches: [main, master]
 
 jobs:
   quality-and-tests:
-    name: Ruff Lint & Offline Unit Tests
+    name: Ruff, Mypy & Pytest Coverage
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -20,13 +21,16 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install core & test dependencies
+      - name: Install core & QA dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install numpy opencv-python pygetwindow pywin32 pytest ruff
+          python -m pip install numpy opencv-python pygetwindow pywin32 pytest pytest-cov ruff mypy
 
       - name: Run Ruff static linter
-        run: python -m ruff check src tests run_app.py build_release.py
+        run: python -m ruff check src tests scripts run_app.py build_release.py
 
-      - name: Run offline unit test suite
-        run: python -m pytest -v
+      - name: Run Mypy static type check
+        run: python -m mypy src
+
+      - name: Run offline unit & synthetic regression suite with coverage
+        run: python -m pytest -v --cov=onmyoji_helper --cov-report=term-missing

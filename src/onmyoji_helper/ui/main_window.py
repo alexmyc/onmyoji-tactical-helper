@@ -9,6 +9,7 @@ import tkinter as tk
 from collections.abc import Callable
 from dataclasses import dataclass
 from tkinter import font
+from typing import Any
 
 from onmyoji_helper.domain.models import OperatingMode
 
@@ -55,13 +56,13 @@ class OnmyojiHelperUI:
         self,
         root: tk.Tk,
         available_bans: list[str] | None,
-        mode_change_callback: Callable[[str], None] | None = None,
+        mode_change_callback: Callable[[str], Any] | None = None,
         sandbox_callback: Callable[[], None] | None = None,
     ) -> None:
         """Initializes GUI layout, typography, thread-safe state flags, and interactive widgets."""
         self.root: tk.Tk = root
         self.available_bans: list[str] = available_bans if available_bans else ["未載入"]
-        self.mode_change_callback: Callable[[str], None] | None = mode_change_callback
+        self.mode_change_callback: Callable[[str], Any] | None = mode_change_callback
         self.sandbox_callback: Callable[[], None] | None = sandbox_callback
         self.theme: ThemePalette = ThemePalette()
 
@@ -137,13 +138,13 @@ class OnmyojiHelperUI:
             activeforeground=t.text_primary,
             highlightthickness=0,
             bd=0,
-            relief=tk.FLAT,
-            indicatoron=0,
+            relief="flat",
+            indicatoron=False,
             cursor="hand2",
             font=self.title_font,
         )
         self.ban_menu["menu"].config(
-            bg=t.menu_bg, fg=t.text_primary, bd=0, relief=tk.FLAT, font=self.title_font
+            bg=t.menu_bg, fg=t.text_primary, bd=0, relief="flat", font=self.title_font
         )
         self.ban_menu.pack(side=tk.LEFT, padx=5)
 

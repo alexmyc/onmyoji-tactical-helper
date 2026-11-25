@@ -47,8 +47,8 @@ def _read_wmic_uuid() -> str:
             candidate = lines[0]
             if candidate and set(candidate.replace("-", "").upper()) != {"F"}:
                 return candidate
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"[Auth] WMIC UUID lookup unavailable, falling back to registry: {exc}")
     return ""
 
 

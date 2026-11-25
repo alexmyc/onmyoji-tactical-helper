@@ -69,8 +69,8 @@ def enable_per_monitor_dpi_awareness() -> None:
     except Exception:
         try:
             ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[Win32Privilege] Legacy SetProcessDPIAware skipped: {exc}")
 
 
 def is_current_process_elevated() -> bool:
@@ -183,10 +183,10 @@ def is_uipi_blocked_for_hwnd(hwnd: int) -> bool:
         if h_token and h_token.value:
             try:
                 _kernel32.CloseHandle(h_token)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"[Win32Privilege] Token CloseHandle note: {exc}")
         if h_proc:
             try:
                 _kernel32.CloseHandle(h_proc)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"[Win32Privilege] Process CloseHandle note: {exc}")

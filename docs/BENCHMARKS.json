@@ -1,0 +1,54 @@
+{
+  "metadata": {
+    "python_version": "3.12.1",
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "AMD64 Family 25 Model 80 Stepping 0, AuthenticAMD",
+    "opencv_version": "5.0.0",
+    "numpy_version": "2.5.3",
+    "command": "python scripts/run_benchmarks.py"
+  },
+  "benchmarks": {
+    "xmind_counter_tree_scoring": {
+      "iterations": 2000,
+      "p50_ms": 0.0773,
+      "p95_ms": 0.0805,
+      "p99_ms": 0.0931,
+      "mean_ms": 0.0771
+    },
+    "shikigami_repo_lru_lookup": {
+      "iterations": 5000,
+      "p50_ms": 0.0004,
+      "p95_ms": 0.0005,
+      "p99_ms": 0.0006,
+      "mean_ms": 0.0004
+    },
+    "noisy_2d_affine_spatial_tracker": {
+      "iterations": 1000,
+      "p50_ms": 0.3222,
+      "p95_ms": 0.3592,
+      "p99_ms": 0.3872,
+      "mean_ms": 0.3239
+    },
+    "mixed_dpi_coordinate_projection": {
+      "iterations": 5000,
+      "p50_ms": 0.0035,
+      "p95_ms": 0.0067,
+      "p99_ms": 0.0073,
+      "mean_ms": 0.0039
+    },
+    "draft_roi_motion_diff_gate": {
+      "iterations": 2000,
+      "p50_ms": 0.0255,
+      "p95_ms": 0.0401,
+      "p99_ms": 0.0448,
+      "mean_ms": 0.0306
+    },
+    "turn_detector_sobel_hsv_full_pass": {
+      "iterations": 500,
+      "p50_ms": 2.787,
+      "p95_ms": 3.6227,
+      "p99_ms": 4.4158,
+      "mean_ms": 2.901
+    }
+  }
+}

@@ -104,8 +104,8 @@ def _parse_list_or_str(val: Any) -> list[str]:
             parsed = json.loads(val_str)
             if isinstance(parsed, list):
                 return [str(x).strip() for x in parsed if str(x).strip()]
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[SheetsSync] Role list JSON parse fallback: {exc}")
     return [x.strip() for x in val_str.split(">") if x.strip()]
 
 
@@ -161,16 +161,16 @@ def _parse_shikigami_tags_table(rows_tags: list[list[str]]) -> dict[str, dict[st
                 prio_roles_json = json.loads(prio_roles_raw)
                 enemy_pref = prio_roles_json.get("enemy_attack_pref", enemy_pref)
                 ally_pref = prio_roles_json.get("ally_buff_pref", ally_pref)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"[SheetsSync] Priority_Target_Roles JSON fallback: {exc}")
 
         skill_details_raw = row_dict.get("Skill_Details", "")
         skill_details_parsed: dict[str, Any] = {}
         if skill_details_raw.startswith("{") and skill_details_raw.endswith("}"):
             try:
                 skill_details_parsed = json.loads(skill_details_raw)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"[SheetsSync] Skill_Details JSON fallback: {exc}")
 
         for s_key in ("S1", "S2", "S3", "S4"):
             if s_key not in skill_details_parsed:

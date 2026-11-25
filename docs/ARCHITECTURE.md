@@ -1,6 +1,6 @@
-# Architecture & Core Algorithms Whitepaper
+# System Architecture Guide
 
-This document details the production-oriented modular architecture, mathematical decision models, `YOLOv8n` training & occlusion-tracking pipeline, mixed-DPI coordinate projections, concurrency invariants, and native `.pyd` compilation workflow of **Onmyoji Tactical Helper**.
+This guide documents the production-oriented 7-layer modular architecture, rule-based decision-tree formulations, `YOLOv8n` spatial tracking & geometric CV pipeline, mixed-DPI coordinate projections, concurrency invariants, and native `.pyd` packaging workflow of **Onmyoji Tactical Helper**.
 
 ---
 
@@ -28,15 +28,15 @@ flowchart LR
 ### Key Architectural Invariants
 1. **Zero Import-Time Side Effects**: Process DPI awareness, OpenMP/BLAS thread-pool caps, rotating log handlers, and neural runtimes (`RapidOCR`, `YOLOv8n`, `Gemma-4`) are never initialized at module import time; all runtime wiring is deferred to `bootstrap.run_application()` or lazy per-engine initialization.
 2. **Dual-Track Configuration Isolation (`infra/env_loader.py`)**:
-   - **Private Cloud Track**: When an untracked `.env` file (`<project_root>/.env` or `<exe_dir>/data/.env`) defines `ONMYOJI_SHEET_*` and `ONMYOJI_AUTH_CSV_URL`, `SheetsSyncStore` synchronizes live 251-unit metadata and playbooks into a local AppData cache obfuscated via vectorized NumPy XOR (`np.bitwise_xor`, ~50x faster than Python byte loops), while `AuthService` validates the hardware SHA-256 Machine ID (`wmic csproduct get uuid` with `Cryptography\MachineGuid` fallback for Windows 11 24H2+).
-   - **Public Sandbox Track**: When `.env` is absent (default after `git clone`) or `--demo` is passed, the application skips UAC elevation and network sync, loading `domain/public_demo_data.py` into `ShikigamiRepository` and `DemoSandboxWindow` cleanly.
-3. **$O(1)$ Amortized Metadata Queries**: `ShikigamiRepository` pre-sorts full-to-short aliases and multi-character tokens once by descending string length at startup and wraps tag lookups in `@lru_cache(maxsize=512)`, reducing dozens of per-frame combat queries to $< 0.02\text{ ms}$.
+   - **Private Cloud Track**: When an untracked `.env` file (`<project_root>/.env` or `<exe_dir>/data/.env`) defines `ONMYOJI_SHEET_*` and `ONMYOJI_AUTH_CSV_URL`, `SheetsSyncStore` synchronizes the full **1,128-entry alias dictionary and 251 shikigami combat tag profiles** from external Google Sheets into a local AppData cache obfuscated via vectorized NumPy XOR (`np.bitwise_xor`, ~50x faster than Python byte loops), while `AuthService` validates the hardware SHA-256 Machine ID (`wmic csproduct get uuid` with `Cryptography\MachineGuid` fallback for Windows 11 24H2+).
+   - **Public Sandbox Track**: When `.env` is absent (default after `git clone`) or `--demo` is passed, the application skips UAC elevation and network sync, loading the self-contained sandbox dataset (`domain/public_demo_data.py`: **25 sample aliases, 13 unit combat profiles, and 2 playbooks**) into `ShikigamiRepository` and `DemoSandboxWindow`.
+3. **$O(1)$ Amortized Metadata Queries**: `ShikigamiRepository` pre-sorts full-to-short aliases and multi-character tokens once by descending string length at startup and wraps tag lookups in `@lru_cache(maxsize=512)` (`P50 < 0.001 ms` in `scripts/run_benchmarks.py`).
 
 ---
 
-## 2. XMind Counter-Tree & Mirror-Match Mathematical Model (`decision/draft_engine.py`)
+## 2. Rule-Based, Dependency-Aware XMind Decision Tree (`decision/draft_engine.py`)
 
-Competitive PvP drafting playbooks form a causal counter-pick tree partitioned by the opponent's Ban root:
+Competitive PvP drafting playbooks are structured as a rule-based, dependency-aware counter-pick tree partitioned by the opponent's Ban root:
 - **Ally Lineup $M = (m_0, m_1, m_2, m_3, m_4)$** is modeled as a **strictly ordered 5-step counter-chain backbone**.
 - **Opponent Lineup $O = \{o_1, \dots, o_5\}$** is modeled as an **order-invariant opening formation set**, eliminating combinatorial noise when opponents permute their first three picks.
 
@@ -76,13 +76,18 @@ Simultaneously, a parallel **Mirror / Copycat Detector** evaluates $P_{\text{opp
 ## 3. Custom `YOLOv8n` Detector, 2D Affine Stabilization & Geometric Verification (`vision/`)
 
 ### 3.1 `YOLOv8n` Architecture, Augmentation & Validation Metrics
-To fit strictly inside a single-PC frame budget alongside a live 60 FPS game client, unit detection uses a custom-trained **`YOLOv8n`** nano detector (`best.pt`, `5.9 MB`, `imgsz=640`, `150 epochs`, classes `{0: enemy, 1: ally}`).
+To stay within a single-PC frame budget alongside a live 60 FPS client, unit detection uses a custom-trained **`YOLOv8n`** nano detector (`best.pt`, `5.9 MB`, `imgsz=640`, `150 epochs`, classes `{0: enemy, 1: ally}`). Both the `best.pt` weights and the annotated combat dataset are standalone external training artifacts excluded from the public repository (`*.pt` git-ignored).
 
-- **Augmentation Pipeline**: Trained with `mosaic = 1.0` (dense 5v5 overlap), aggressive HSV color-space perturbation (`hsv_h = 0.015`, `hsv_s = 0.70`, `hsv_v = 0.40` to build invariance against high-luminance ultimate VFX), geometric translation/scaling (`translate = 0.10`, `scale = 0.20`), and horizontal flip (`fliplr = 0.50`).
-- **Validation Performance**: Achieves **`mAP@50 = 99.5%`**, **`Recall = 93.5%`**, **`Precision = 89.0%`**, and **`mAP@50-95 = 60.1%`**. While ornate character skins and floating particle halos introduce tight-IoU variance (`mAP@50-95`), high centroid recall (`93.5%` / `99.5% @ IoU=0.50`) provides reliable spatial observations for our downstream affine tracker.
+- **Augmentation Pipeline**: Trained with `mosaic = 1.0` (dense 5v5 overlap), HSV color-space perturbation (`hsv_h = 0.015`, `hsv_s = 0.70`, `hsv_v = 0.40` for high-luminance ultimate VFX), geometric translation/scaling (`translate = 0.10`, `scale = 0.20`), and horizontal flip (`fliplr = 0.50`).
+- **Validation Performance**:
+  - **`mAP@50`**: `99.5%` (`0.9950`)
+  - **`Precision`**: `89.0%` (`0.8898`)
+  - **`Recall`**: `93.5%` (`0.9353`)
+  - **`mAP@50-95`**: `60.1%` (`0.6007`)
+  - Tight-IoU variance (`mAP@50-95`) arising from ornate character skins and floating particle halos is compensated downstream by EMA coordinate smoothing and affine slot anchoring.
 
 ### 3.2 2D Partial Affine Stabilization & `3.5s` Occlusion Continuity (`StateParser`)
-During 5v5 combat, ultimate animations trigger camera zoom/pan motion and multi-second particle blackouts:
+During 5v5 combat, ultimate animations trigger camera zoom/pan motion, `±4 px` bounding-box jitter, and multi-second particle blackouts:
 
 1. **Dynamic Baseline Anchoring**: Once 5 units of a camp are localized, `StateParser` locks an initial horizontal baseline $\{p_i^{(0)}\}_{i=1}^5$ (automatically rescaling anchors proportionally if the window is resized mid-match).
 2. **2D Partial Affine Camera Solve**: Whenever at least 3 units are visible on frame $t$, `cv2.estimateAffinePartial2D` solves the 4-DoF transformation matrix $\mathbf{H}_t \in \mathbb{R}^{2 \times 3}$ (scale, rotation, translation) mapping baseline anchors to current frame coordinates, projecting occluded unit positions $\hat{p}_k^{(t)}$:
@@ -91,10 +96,11 @@ $$
 \hat{p}_k^{(t)} = \mathbf{H}_t \begin{bmatrix} p_{k,x}^{(0)} \\ p_{k,y}^{(0)} \\ 1 \end{bmatrix}
 $$
 
-3. **Symmetric EMA Trajectories & `3.5s` Grace Recovery**: Both ally and enemy camps maintain exponential moving average positions (`smooth_pos_my`, `smooth_pos_opp`). If a unit vanishes due to ultimate VFX ($\Delta t < 3.5\text{ s}$), its alive state and coordinates recover via $\hat{p}_k^{(t)} \to \text{EMA}_k \to p_k^{(0)}$, maintaining `100%` slot continuity (`<= 4 px` drift in `tests/test_vision_replay.py`) before transitioning genuinely defeated units ($\Delta t \ge 3.5\text{ s}$) to `alive = False`.
+3. **Symmetric EMA Trajectories & `3.5s` Grace Recovery**: Both ally and enemy camps maintain exponential moving average positions (`smooth_pos_my`, `smooth_pos_opp`), suppressing frame-to-frame detection jitter by `> 35%`. If a unit vanishes due to ultimate VFX ($\Delta t < 3.5\text{ s}$), its alive state and coordinates recover via $\hat{p}_k^{(t)} \to \text{EMA}_k \to p_k^{(0)}$, maintaining `100%` slot continuity (`< 10 px` mean error under `±4 px` noise + random dropouts in `tests/test_vision_synthetic_regression.py`) before transitioning genuinely defeated units ($\Delta t \ge 3.5\text{ s}$) to `alive = False`.
 
-### 3.3 Circumferential Sobel Turn & Skill-Slot Verifier (`TurnDetector`)
-Rather than brittle pixel-color polling, `TurnDetector` combines `CLAHE` (`clipLimit=2.5`), `HoughCircles`, and a **16-point circumferential Sobel gradient check** (`>= 7/16` perimeter samples with $\|\nabla I\| \ge 32.0$ plus pairwise radius/vertical colinearity `r_diff <= 12%`, `y_diff <= 8%`). This rejects full-screen bright VFX flashbangs while dynamically distinguishing 3-skill vs. 4-skill unit layouts and classifying orb/cooldown availability in HSV space (`V_mean >= 75`, `V_90 >= 110`, `S_mean >= 30 | S_85 >= 45`).
+### 3.3 Circumferential Sobel Turn Verifier & Motion-Gated `RapidOCR`
+- **`TurnDetector`**: Combines `CLAHE` (`clipLimit=2.5`), `HoughCircles`, and a **16-point circumferential Sobel gradient check** (`>= 7/16` perimeter samples with $\|\nabla I\| \ge 32.0$ plus pairwise radius/vertical colinearity `r_diff <= 12%`, `y_diff <= 8%`), rejecting full-screen flashbang washouts while distinguishing 3- vs. 4-skill layouts and HSV availability (`V_mean >= 75`, `V_90 >= 110`, `S_mean >= 30 | S_85 >= 45`).
+- **`DraftOcrScanner`**: Resizes the opponent ROI (`1.30x` linear upscale, or normalized to `640 px` width on narrow windows), horizontally stitches the aligned ally column (`np.hstack`) for a single `RapidOCR` invocation, and filters out low-confidence background noise via `min_confidence = 0.65`.
 
 ---
 
@@ -104,8 +110,8 @@ Rather than brittle pixel-color polling, `TurnDetector` combines `CLAHE` (`clipL
 stateDiagram-v2
     [*] --> Green: Default Startup (0 MB VRAM)
     Green --> Yellow: Click Status Dot (Load YOLOv8n + Gemma-4 / Rule Tier)
-    Yellow --> Red: Click Status Dot (Arm Override Guard + Restore GA_ROOT Focus)
-    Red --> Yellow: F12 / ESC / Physical Mouse Movement (< 50 ms Override, Keep VRAM & HUD)
+    Yellow --> Red: Click Status Dot (Arm SafetyGuard + Restore GA_ROOT Focus)
+    Red --> Yellow: F12/ESC (50 ms Poll) or >95 px Mouse Step Delta (Keep VRAM & HUD)
     Red --> Green: Click Status Dot (Stop Combat Threads & Release CUDA VRAM)
     Yellow --> Green: Close Tactical Panel or Cycle Dot (Release CUDA VRAM)
 ```
@@ -122,10 +128,13 @@ $$
 
 Screen coordinates are translated via `ClientToScreen` and clamped within the intersection of the client rect and `GetAncestor(hwnd, GA_ROOT)` root window bounds—preserving 1:1 alignment across `16:9`, `16:10` (`1920×1200`), and negative-coordinate multi-monitor setups.
 
-### 4.2 Smooth Cursor Interpolation, UI Hover Stabilization & Human-in-the-Loop Controls
-- **Smooth Cursor Interpolation & UI Hover Stabilization**: DirectX/Messiah UI frameworks update hover hitboxes asynchronously on mouse-move messages. `win32_input.py` interpolates cursor motion smoothly to the target control and emits a zero-delta `MOUSEEVENTF_MOVE` hover stabilization pulse (`35–50 ms`) prior to `SendInput` button dispatch so UI hover states register reliably without dropped clicks.
+### 4.2 Smooth Cursor Interpolation, UI Hover Stabilization & Human-in-the-Loop Override Split
+- **Smooth Cursor Interpolation & UI Hover Stabilization**: DirectX/Messiah UI frameworks update hover hitboxes asynchronously on mouse-move messages. `win32_input.perform_humanized_click` interpolates cursor motion across `4–6` smoothstep slices (`SetCursorPos`) and emits a zero-delta `MOUSEEVENTF_MOVE` hover stabilization pulse (`35–50 ms`) prior to `SendInput` button dispatch so UI hover states register reliably.
 - **Unified 2-Step Dispatch & `S1` Fallback**: Single-target skills, enemy AoE (`敵方全體`), and ally AoE (`我方全體`) follow a unified 2-step sequence (**Step 1: Alive Unit Lock** $\to$ **Step 2: Skill Button Dispatch**). When `S2/S3/S4` are unavailable due to insufficient orbs or cooldown, `AutoBattleExecutor` automatically falls back to `[S1]` normal attack on the highest-priority alive enemy unit.
-- **Human-in-the-Loop Override & Turn Latch**: Every dispatch engages a `>= 2.2s` cooldown timer and a `True -> False -> True` turn-edge latch (`5.5s` extra-turn escape hatch), while `SafetyGuard` polls `F12`, `ESC`, and physical cursor displacement every `50 ms` to yield control back to passive Yellow Mode immediately.
+- **Two-Layer Human-in-the-Loop Override Architecture**:
+  1. **Background Emergency Hotkey Thread (`SafetyGuard`)**: `RedModeKillSwitch` polls `F12` and `ESC` via `GetAsyncKeyState` every **`50 ms`**, setting `stop_event`, incrementing `ModeController._transition_epoch`, and immediately downgrading to Yellow Mode.
+  2. **In-Flight Cursor Takeover Check (`Win32Input`)**: Between consecutive smoothstep interpolation slices inside `perform_humanized_click`, `get_cursor_pos()` compares actual physical cursor position against the previous slice position; if unexpected user mouse movement exceeds **`> 95 px`** (`mouse_takeover_px`), the click aborts before `SendInput` and triggers the same Yellow Mode downgrade callback.
+  3. **Single-Action Turn Latch**: Every completed dispatch engages both a `>= 2.2s` cooldown timer and a `True -> False -> True` turn-edge latch (`5.5s` extra-turn escape hatch).
 
 ---
 
@@ -134,15 +143,15 @@ Screen coordinates are translated via `ClientToScreen` and clamped within the in
 | Thread Name | Cadence / Trigger | Synchronization Boundary & Responsibility |
 | :--- | :--- | :--- |
 | **`MainThread` (Tkinter)** | `50 ms` UI queue drain + `.after(0)` | Sole owner of Tkinter widgets and Canvas primitives; floating panels apply 64-bit safe `WS_EX_NOACTIVATE` post-`deiconify()`. |
-| **`ocr_worker`** | `0.9s / 1.3s / 2.5s / 4.5s` | Executes GDI draft capture, motion-diff gating, `RapidOCR`, and `DraftStateMachine`; publishes immutable tuples over `queue.Queue`. |
+| **`ocr_worker`** | `0.9s / 1.3s / 2.5s / 4.5s` | Executes GDI draft capture, motion-diff gating, `RapidOCR` (`min_confidence=0.65`), and `DraftStateMachine`; publishes tuples via `queue.Queue`. |
 | **`BattleCoordinatorLoop`** | `0.25s` (ally) / `0.60s` (enemy) | Acquires `yolo_lock` for `YOLOv8n` + affine tracking; guards shared slot dictionaries via re-entrant `_state_lock (RLock)`. |
 | **`AsyncGemmaWorker`** | On turn edge (`>= 3.0s` cooldown) | Acquires independent `llm_lock` for Gemma-4 GGUF completion so LLM prefill never blocks `0.25s` HUD tracking. |
-| **`RedModeKillSwitch`** | `50 ms` `GetAsyncKeyState` poll | Monitors `F12` / `ESC` override keys; increments `ModeController._transition_epoch` and atomically disarms `auto_battle_enabled`. |
+| **`RedModeKillSwitch`** | `50 ms` `GetAsyncKeyState` poll | Monitors `F12` / `ESC` override hotkeys; increments `ModeController._transition_epoch` and atomically disarms `auto_battle_enabled`. |
 
 ---
 
-## 6. Native Binary Compilation & IP Protection (`build_release.py`)
+## 6. Native Binary Compilation — Source Obfuscation & Packaging (`build_release.py`)
 
-1. **Sequential Low-RAM Cython 3.3 Compilation**: Discovers all **33 modules** under `src/onmyoji_helper/` and compiles each inside an isolated child process (`--workers 1` default) into native Windows `.pyd` C-extensions with `docstrings=False`, `binding=False`, `c_line_in_traceback=False`, `emit_code_comments=False`, MSVC `/O2 /DNDEBUG`, and `/DEBUG:NONE` symbol stripping for source-level IP protection.
+1. **Sequential Low-RAM Cython 3.3 Compilation**: Discovers all **33 modules** under `src/onmyoji_helper/` and compiles each inside an isolated child process (`--workers 1` default) into native Windows `.pyd` C-extensions with `docstrings=False`, `binding=False`, `c_line_in_traceback=False`, `emit_code_comments=False`, MSVC `/O2 /DNDEBUG`, and `/DEBUG:NONE` symbol stripping for source obfuscation and distribution hygiene.
 2. **PyInstaller Standalone Packaging**: Packages `OnmyojiHelper.exe` with `--onedir --windowed --uac-admin --contents-directory=data`, embedding the Windows `requireAdministrator` PE `RT_MANIFEST` and copying `best.pt` (plus local `.env` into `data/.env` when present) directly without archive re-compression.
 3. **Automated Post-Build Hygiene Audit**: Verifies root directory cleanliness (`['OnmyojiHelper.exe', 'data']`), `requireAdministrator` manifest presence, `33/33` `.pyd` module completeness, and **zero `.py` source files** in the release directory.

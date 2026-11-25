@@ -77,16 +77,16 @@ class AITacticalUI:
         try:
             if self.winfo_exists():
                 self.lbl_advice.config(text=advice_text)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[AITacticalUI] Advice label update skipped: {exc}")
 
     def reset_to_blank(self) -> None:
         """Clears the tactical advice text."""
         try:
             if self.winfo_exists():
                 self.lbl_advice.config(text="")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[AITacticalUI] Reset to blank skipped: {exc}")
 
     def _on_close(self) -> None:
         if callable(self.close_callback):
@@ -101,5 +101,5 @@ class AITacticalUI:
         try:
             if self.winfo_exists():
                 self.window.destroy()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[AITacticalUI] Window destroy skipped: {exc}")

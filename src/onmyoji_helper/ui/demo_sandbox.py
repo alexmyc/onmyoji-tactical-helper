@@ -5,7 +5,9 @@ counter-tree reasoning, dead-branch viability pivots, mirror-match detection, an
 targeting using the real production engines without requiring the game client, GPU, or `.env`.
 """
 
+import logging
 import tkinter as tk
+from collections.abc import Callable
 from dataclasses import dataclass
 from tkinter import font
 from typing import Any
@@ -18,6 +20,8 @@ from onmyoji_helper.domain.models import DraftPhase, OperatingMode
 from onmyoji_helper.domain.shikigami_repository import ShikigamiRepository
 from onmyoji_helper.ui.main_window import OnmyojiHelperUI
 from onmyoji_helper.ui.tactical_panel import AITacticalUI
+
+logger = logging.getLogger("OnmyojiHelper")
 
 
 @dataclass(frozen=True)
@@ -555,6 +559,9 @@ class DemoSandboxWindow:
             font=self.btn_font,
         ).pack(anchor="w", pady=(0, 4))
 
+        def _make_scenario_cmd(scen_idx: int) -> Callable[[], None]:
+            return lambda: self._on_select_scenario(scen_idx)
+
         for idx, title in enumerate(DemoSandboxController.SCENARIO_TITLES):
             btn = tk.Button(
                 scen_frame,
@@ -565,9 +572,9 @@ class DemoSandboxWindow:
                 activebackground="#2C2C2E",
                 activeforeground="#FFFFFF",
                 font=self.sub_font,
-                relief=tk.FLAT,
+                relief="flat",
                 cursor="hand2",
-                command=lambda i=idx: self._on_select_scenario(i),
+                command=_make_scenario_cmd(idx),
             )
             btn.pack(fill=tk.X, pady=2, ipady=4)
             self._scenario_btns.append(btn)
@@ -709,8 +716,8 @@ class DemoSandboxWindow:
         if self._after_id is not None:
             try:
                 self.root.after_cancel(self._after_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"[DemoSandbox] Autoplay timer cancel skipped: {exc}")
             self._after_id = None
         if self.winfo_exists():
             self.btn_auto.config(text="⚡ Auto-Play All", bg="#30D158")

@@ -107,8 +107,8 @@ class AITacticalManager:
                             self.mode_controller.update_status_text(uipi_warn)
                     else:
                         self.auto_executor.is_game_window_foreground(game_hwnd, allow_reclaim_from_self=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"[BattleCoordinator] Initial Red Mode window check skipped: {exc}")
         else:
             self.auto_executor.stop_immediately()
 
@@ -256,8 +256,8 @@ class AITacticalManager:
             try:
                 if win32gui.IsWindow(preferred_hwnd) and win32gui.IsWindowVisible(preferred_hwnd):
                     return int(preferred_hwnd)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"[BattleCoordinator] Preferred HWND check skipped: {exc}")
 
         windows = clicker.find_windows()
         if not windows:
@@ -268,8 +268,8 @@ class AITacticalManager:
             for w in windows:
                 if w._hWnd == fg_hwnd:
                     return int(w._hWnd)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[BattleCoordinator] Foreground HWND lookup skipped: {exc}")
         return int(windows[0]._hWnd)
 
     def _battle_loop(

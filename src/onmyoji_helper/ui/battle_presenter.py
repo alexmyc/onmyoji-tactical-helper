@@ -143,8 +143,8 @@ class BattlePresenter:
 
         try:
             root_window.after(0, _apply)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[BattlePresenter] Advice text schedule skipped: {exc}")
 
     def reset_blank(self, root_window: tk.Tk | None) -> None:
         """Clears text and overlay canvas elements on match completion."""
@@ -161,8 +161,8 @@ class BattlePresenter:
 
         try:
             root_window.after(0, _clear)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[BattlePresenter] Blank reset schedule skipped: {exc}")
 
     def destroy_all(self, root_window: tk.Tk | None) -> None:
         """Destroys both floating windows safely on the main thread."""
@@ -181,5 +181,5 @@ class BattlePresenter:
 
         try:
             root_window.after(0, _destroy)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[BattlePresenter] Window destroy schedule skipped: {exc}")

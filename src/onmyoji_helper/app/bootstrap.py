@@ -308,8 +308,8 @@ def run_application(argv: list[str] | None = None) -> None:
             err_root.withdraw()
             messagebox.showerror("資料庫載入失敗", f"無法連線至雲端資料庫且本機尚無快取，請檢查網路連線。\n({exc})")
             err_root.destroy()
-        except Exception:
-            pass
+        except Exception as ui_err:
+            logger.debug(f"[Bootstrap] Error dialog fallback skipped: {ui_err}")
         sys.exit(1)
 
     repository = ShikigamiRepository(

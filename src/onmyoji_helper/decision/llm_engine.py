@@ -43,8 +43,8 @@ def evaluate_hardware_tier() -> tuple[str, bool, str]:
         stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
         if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
             total_ram_gb = stat.ullTotalPhys / (1024 ** 3)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"[TacticalEngine] Host RAM probe fallback: {exc}")
 
     has_cuda = False
     vram_gb = 0.0
@@ -57,8 +57,8 @@ def evaluate_hardware_tier() -> tuple[str, bool, str]:
             props = torch.cuda.get_device_properties(0)
             vram_gb = props.total_memory / (1024 ** 3)
             gpu_name = torch.cuda.get_device_name(0)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"[TacticalEngine] CUDA probe skipped: {exc}")
 
     if not has_cuda:
         return "輕量規則模式", False, "未偵測到獨立 NVIDIA GPU (內顯環境，自動優化防止遊戲卡頓)"
@@ -137,8 +137,8 @@ class TacticalEngine:
         if self.llm is not None:
             try:
                 del self.llm
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"[TacticalEngine] LLM release cleanup note: {exc}")
             self.llm = None
             gc.collect()
 

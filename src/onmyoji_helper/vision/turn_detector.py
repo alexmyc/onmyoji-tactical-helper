@@ -144,7 +144,7 @@ class TurnDetector:
             self._last_raw_turn = False
             return False
 
-        circles_arr = np.uint16(np.around(circles[0]))
+        circles_arr: np.ndarray = np.asarray(np.around(circles[0]), dtype=np.uint16)
         valid_circles = []
 
         sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
@@ -234,7 +234,7 @@ class TurnDetector:
         if circles is None:
             return False
 
-        circles_arr = np.uint16(np.around(circles[0]))
+        circles_arr: np.ndarray = np.asarray(np.around(circles[0]), dtype=np.uint16)
         cx_target, cy_target = 32, 30
         for c in circles_arr:
             cx, cy, cr = int(c[0]), int(c[1]), int(c[2])
@@ -284,7 +284,11 @@ class TurnDetector:
         frame_seq: int | None = None,
     ) -> dict[str, bool]:
         """Evaluates skill availability (lit vs. grayed-out/cooldown) via normalized HSV metrics."""
-        if not self.is_turn_confirmed or not self._eval_single_frame_turn(screen_color, frame_seq=frame_seq):
+        if (
+            screen_color is None
+            or not self.is_turn_confirmed
+            or not self._eval_single_frame_turn(screen_color, frame_seq=frame_seq)
+        ):
             return {"s1": False, "s2": False, "s3": False, "s4": False}
 
         h, w = screen_color.shape[:2]

@@ -150,23 +150,23 @@ class CaptureEngine:
             if save_bitmap is not None:
                 try:
                     win32gui.DeleteObject(save_bitmap.GetHandle())
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(f"[CaptureEngine] DeleteObject cleanup note: {exc}")
             if save_dc is not None:
                 try:
                     save_dc.DeleteDC()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(f"[CaptureEngine] save_dc.DeleteDC cleanup note: {exc}")
             if mfc_dc is not None:
                 try:
                     mfc_dc.DeleteDC()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(f"[CaptureEngine] mfc_dc.DeleteDC cleanup note: {exc}")
             if hwnd_dc is not None and hwnd:
                 try:
                     win32gui.ReleaseDC(hwnd, hwnd_dc)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(f"[CaptureEngine] ReleaseDC cleanup note: {exc}")
 
     def capture_window_bitblt(
         self,

@@ -107,8 +107,8 @@ class ModelLifecycleManager:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[ModelLifecycle] CUDA cache purge skipped: {exc}")
         gc.collect()
 
     def unload_all(self) -> None:
@@ -117,8 +117,8 @@ class ModelLifecycleManager:
             if self.tactical_engine is not None:
                 try:
                     self.tactical_engine.release()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(f"[ModelLifecycle] TacticalEngine release note: {exc}")
                 self.tactical_engine = None
 
             if self.yolo_model is not None:
@@ -126,8 +126,8 @@ class ModelLifecycleManager:
                     if hasattr(self.yolo_model, "model"):
                         del self.yolo_model.model
                     del self.yolo_model
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(f"[ModelLifecycle] YOLO unload note: {exc}")
                 self.yolo_model = None
 
             self.purge_cuda_cache()

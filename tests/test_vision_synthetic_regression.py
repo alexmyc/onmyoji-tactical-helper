@@ -1,20 +1,29 @@
-"""Synthetic Multi-Frame Vision Replay Regression Suite.
+"""Synthetic Vision Regression Suite (Noisy Tracking, Occlusion, Sobel Turn & OCR Confidence).
 
 Offline deterministic verification of:
 1. `TurnDetector`: CLAHE + HoughCircles + 16-point circumferential Sobel ring gradient + HSV
    skill-availability classification across 3-skill/4-skill layouts, temporal debouncing, and
    full-screen VFX flashbang false-positive rejection.
-2. `StateParser` (`SpatialTracker`): Continuous multi-frame camera pan/zoom (`estimateAffinePartial2D`)
-   and symmetric `3.5s` ultimate-VFX occlusion coordinate continuity.
+2. `StateParser` (`SpatialTracker`): Multi-frame camera pan/zoom (`estimateAffinePartial2D`)
+   under realistic `±4 px` Gaussian detection jitter, random single-frame dropouts, and
+   continuous `3.0s` (`< 3.5s` grace) ultimate-VFX occlusion.
+3. `DraftOcrScanner`: Configurable `min_confidence=0.65` filtering of low-confidence background
+   OCR noise without dropping genuine *Onmyoji* Ban/Pick text.
 """
 
 import math
+import random
+from typing import Any
 
 import cv2
 import numpy as np
 import pytest
 
 import onmyoji_helper.vision.turn_detector as turn_mod
+from onmyoji_helper.decision.draft_fsm import DraftStateMachine
+from onmyoji_helper.domain.public_demo_data import get_public_demo_bundle
+from onmyoji_helper.domain.shikigami_repository import ShikigamiRepository
+from onmyoji_helper.vision.draft_ocr_scanner import DraftOcrScanner
 from onmyoji_helper.vision.spatial_tracker import StateParser
 from onmyoji_helper.vision.turn_detector import TurnDetector
 
@@ -37,24 +46,17 @@ def _render_synthetic_combat_frame(
     w: int = FRAME_W,
     h: int = FRAME_H,
 ) -> np.ndarray:
-    """Synthesizes a 1280x720 BGR combat frame with dark arena background and circular skill buttons.
-
-    Args:
-        detector: `TurnDetector` instance providing normalized physical slot bounds.
-        slot_configs: Mapping of `'slot_1'..'slot_4'` -> `True` (lit/available) or `False` (cooldown/0-orb).
-    """
+    """Synthesizes a 1280x720 BGR combat frame with dark arena background and circular skill buttons."""
     frame = np.full((h, w, 3), (18, 20, 24), dtype=np.uint8)
     radius = 28
 
     for slot_key, is_available in slot_configs.items():
         cx, cy = _slot_center_px(detector, slot_key, w, h)
         if is_available:
-            # Vibrant golden-amber active skill core + bright metallic ring edge
             cv2.circle(frame, (cx, cy), radius - 1, (38, 178, 245), thickness=-1, lineType=cv2.LINE_AA)
             cv2.circle(frame, (cx, cy), radius - 9, (65, 205, 255), thickness=-1, lineType=cv2.LINE_AA)
             cv2.circle(frame, (cx, cy), radius, (235, 245, 255), thickness=2, lineType=cv2.LINE_AA)
         else:
-            # Desaturated dim cooldown/0-orb skill core + visible button bezel ring
             cv2.circle(frame, (cx, cy), radius - 1, (54, 54, 54), thickness=-1, lineType=cv2.LINE_AA)
             cv2.circle(frame, (cx, cy), radius, (158, 158, 158), thickness=2, lineType=cv2.LINE_AA)
 
@@ -68,16 +70,12 @@ def test_turn_detector_3skill_and_4skill_ring_sobel_and_hsv_replay(
     sim_clock = [100.0]
     monkeypatch.setattr(turn_mod.time, "time", lambda: sim_clock[0])
 
-    # Replay A: 3-skill unit turn (slot_1 absent; slot_2=S1 lit, slot_3=S2 greyed out, slot_4=S3 lit)
     frame_3skill = _render_synthetic_combat_frame(
         detector,
         {"slot_2": True, "slot_3": False, "slot_4": True},
     )
 
-    # t=100.00s: First detection starts debounce timer (< 0.40s threshold -> not yet confirmed)
     assert detector.is_my_turn(frame_3skill, frame_seq=1) is False
-
-    # t=100.45s: Exceeds 0.40s activation threshold -> turn confirmed!
     sim_clock[0] = 100.45
     assert detector.is_my_turn(frame_3skill, frame_seq=2) is True
 
@@ -87,14 +85,12 @@ def test_turn_detector_3skill_and_4skill_ring_sobel_and_hsv_replay(
     skills_3 = detector.detect_available_skills(frame_3skill, frame_seq=2)
     assert skills_3 == {"s1": True, "s2": False, "s3": True, "s4": False}
 
-    # End turn and advance past 0.15s deactivation grace + 0.50s post-turn lockout
     dark_frame = _render_synthetic_combat_frame(detector, {})
     sim_clock[0] = 100.50
     detector.is_my_turn(dark_frame, frame_seq=3)
     sim_clock[0] = 100.70
     assert detector.is_my_turn(dark_frame, frame_seq=4) is False
 
-    # Replay B: 4-skill unit turn (slot_1=S1 lit, slot_2=S2 false, slot_3=S3 false, slot_4=S4 lit)
     detector.reset_cache()
     frame_4skill = _render_synthetic_combat_frame(
         detector,
@@ -119,7 +115,6 @@ def test_turn_detector_rejects_vfx_flashbang_and_enforces_temporal_debounce(
     sim_clock = [200.0]
     monkeypatch.setattr(turn_mod.time, "time", lambda: sim_clock[0])
 
-    # Synthesize bright VFX explosion / linear slash streaks across the skill-bar ROI (no circular rings)
     vfx_flash = np.full((FRAME_H, FRAME_W, 3), (225, 240, 255), dtype=np.uint8)
     for offset in range(860, 1260, 35):
         cv2.line(vfx_flash, (offset, 610), (offset + 40, 718), (40, 90, 180), thickness=4)
@@ -134,7 +129,6 @@ def test_turn_detector_rejects_vfx_flashbang_and_enforces_temporal_debounce(
         "s4": False,
     }
 
-    # Confirm active turn, then verify a transient 100ms (< 150ms grace) occlusion does NOT drop the turn
     detector.reset_cache()
     active_frame = _render_synthetic_combat_frame(
         detector,
@@ -145,15 +139,15 @@ def test_turn_detector_rejects_vfx_flashbang_and_enforces_temporal_debounce(
     sim_clock[0] = 202.45
     assert detector.is_my_turn(active_frame, frame_seq=4) is True
 
-    # Transient 100ms particle flash occluding buttons (< 0.15s DEACTIVATION_GRACE)
     sim_clock[0] = 202.50
     assert detector.is_my_turn(vfx_flash, frame_seq=5) is True
     sim_clock[0] = 202.60
     assert detector.is_my_turn(vfx_flash, frame_seq=6) is True
 
 
-def test_spatial_tracker_multiframe_camera_motion_and_3_5s_occlusion_continuity() -> None:
-    """Replays 12 frames (3.3s) of camera pan/zoom while Enemy Slot 1 & Ally Slot 2 are occluded."""
+def test_spatial_tracker_noisy_gaussian_jitter_and_random_single_frame_dropouts() -> None:
+    """Verifies EMA jitter suppression and affine occlusion recovery under ±4 px noise & random dropouts."""
+    rng = random.Random(20261125)
     parser = StateParser()
     w, h = 1144, 640
 
@@ -174,67 +168,94 @@ def test_spatial_tracker_multiframe_camera_motion_and_3_5s_occlusion_continuity(
 
     def transform_pt(pt: tuple[float, float], scale: float, dx: float, dy: float) -> tuple[float, float]:
         cx0, cy0 = w * 0.5, h * 0.5
-        return (
-            cx0 + (pt[0] - cx0) * scale + dx,
-            cy0 + (pt[1] - cy0) * scale + dy,
-        )
+        return cx0 + (pt[0] - cx0) * scale + dx, cy0 + (pt[1] - cy0) * scale + dy
 
-    prev_opp_slot1: tuple[int, int] | None = None
-    prev_my_slot2: tuple[int, int] | None = None
+    def bounded_jitter() -> float:
+        return max(-4.0, min(4.0, rng.gauss(0.0, 2.6)))
 
-    # Replay t = 0.0s .. 3.3s in 0.3s steps (frames 2..11 have Enemy Slot 1 & Ally Slot 2 occluded for 3.0s)
-    for frame_idx in range(12):
+    raw_step_deltas: list[float] = []
+    ema_step_deltas: list[float] = []
+    occlusion_errors_px: list[float] = []
+    prev_raw_my1: tuple[float, float] | None = None
+    prev_ema_my1: tuple[int, int] | None = None
+
+    # 24 frames (t = 50.0s .. 56.9s at 0.30s cadence):
+    # - Frame 0: clean 5v5 baseline lock
+    # - Frames 1..10 (3.0s < 3.5s grace): Enemy Slot 1 continuously occluded + ±4 px noise + random single-frame dropouts
+    # - Frames 11..23: Static camera with ±4 px detection jitter to measure EMA variance reduction
+    for frame_idx in range(24):
         t_sec = 50.0 + frame_idx * 0.30
-        is_occluded = frame_idx >= 2  # Occluded from t=50.6s through t=53.3s (delta = 3.0s < 3.5s grace)
+        in_camera_pan = 1 <= frame_idx <= 10
+        occlude_opp_slot1 = 1 <= frame_idx <= 10
 
-        phase = frame_idx * 0.45
-        scale = 1.0 + 0.02 * math.sin(phase) if frame_idx > 0 else 1.0
-        dx = 16.0 * math.sin(phase) if frame_idx > 0 else 0.0
-        dy = -9.0 * math.sin(phase) if frame_idx > 0 else 0.0
+        phase = frame_idx * 0.40
+        scale = 1.0 + (0.02 * math.sin(phase) if in_camera_pan else 0.0)
+        dx = 14.0 * math.sin(phase) if in_camera_pan else 0.0
+        dy = -8.0 * math.sin(phase) if in_camera_pan else 0.0
 
         yolo_boxes: list[dict[str, float | int]] = []
         gt_opp_slot1 = transform_pt(opp_base["Slot 1"], scale, dx, dy)
-        gt_my_slot2 = transform_pt(my_base["Slot 2"], scale, dx, dy)
+
+        # Deterministically drop at most 1 extra non-Slot-1 unit on alternating frames to simulate detector flicker
+        dropped_opp_extra = "Slot 4" if (in_camera_pan and frame_idx % 3 == 2) else None
+        dropped_my_extra = "Slot 5" if (in_camera_pan and frame_idx % 4 == 1) else None
 
         for slot_name, b_pt in opp_base.items():
-            if is_occluded and slot_name == "Slot 1":
+            if (occlude_opp_slot1 and slot_name == "Slot 1") or slot_name == dropped_opp_extra:
                 continue
             tx, ty = transform_pt(b_pt, scale, dx, dy)
-            yolo_boxes.append({"cls": 0, "cx": tx, "cy": ty})
+            jx = tx + (bounded_jitter() if frame_idx > 0 else 0.0)
+            jy = ty + (bounded_jitter() if frame_idx > 0 else 0.0)
+            yolo_boxes.append({"cls": 0, "cx": jx, "cy": jy})
 
+        curr_raw_my1: tuple[float, float] | None = None
         for slot_name, b_pt in my_base.items():
-            if is_occluded and slot_name == "Slot 2":
+            if slot_name == dropped_my_extra:
                 continue
             tx, ty = transform_pt(b_pt, scale, dx, dy)
-            yolo_boxes.append({"cls": 1, "cx": tx, "cy": ty})
+            jx = tx + (bounded_jitter() if frame_idx > 0 else 0.0)
+            jy = ty + (bounded_jitter() if frame_idx > 0 else 0.0)
+            yolo_boxes.append({"cls": 1, "cx": jx, "cy": jy})
+            if slot_name == "Slot 1":
+                curr_raw_my1 = (jx, jy)
 
         my_status, opp_status = parser.parse_frame(
             MY_LINEUP, OPP_LINEUP, yolo_boxes, screen_width=w, screen_height=h, now=t_sec
         )
 
-        # Every single unit on both teams must remain alive with valid non-zero coordinates
+        # 100% slot retention across both continuous 3.0s occlusion and random single-frame dropouts
         assert all(u["alive"] and u["pos"] != (0, 0) for u in opp_status.values())
         assert all(u["alive"] and u["pos"] != (0, 0) for u in my_status.values())
 
-        est_opp1 = opp_status["Slot 1"]["pos"]
-        est_my2 = my_status["Slot 2"]["pos"]
+        if occlude_opp_slot1:
+            est_opp1 = opp_status["Slot 1"]["pos"]
+            err_px = math.hypot(est_opp1[0] - gt_opp_slot1[0], est_opp1[1] - gt_opp_slot1[1])
+            occlusion_errors_px.append(err_px)
+            # Even under worst-case cantilever extrapolation (2 rightmost anchors dropped + ±4 px noise), stays well inside ~50 px unit hitbox
+            assert err_px <= 22.0, f"Noisy affine occlusion prediction drifted by {err_px:.2f} px"
 
-        if is_occluded:
-            # 2D partial affine solver tracks camera motion within <= 4 px of ground truth!
-            assert math.hypot(est_opp1[0] - gt_opp_slot1[0], est_opp1[1] - gt_opp_slot1[1]) <= 4.0
-            assert math.hypot(est_my2[0] - gt_my_slot2[0], est_my2[1] - gt_my_slot2[1]) <= 4.0
+        # Measure frame-to-frame jitter suppression on static-camera noisy frames (12..23)
+        if frame_idx >= 12 and curr_raw_my1 is not None:
+            curr_ema_my1 = my_status["Slot 1"]["pos"]
+            if prev_raw_my1 is not None and prev_ema_my1 is not None:
+                raw_step_deltas.append(
+                    math.hypot(curr_raw_my1[0] - prev_raw_my1[0], curr_raw_my1[1] - prev_raw_my1[1])
+                )
+                ema_step_deltas.append(
+                    math.hypot(curr_ema_my1[0] - prev_ema_my1[0], curr_ema_my1[1] - prev_ema_my1[1])
+                )
+            prev_raw_my1 = curr_raw_my1
+            prev_ema_my1 = curr_ema_my1
 
-        if prev_opp_slot1 is not None and prev_my_slot2 is not None:
-            # Verify trajectory smoothness (no sudden coordinate teleportation)
-            assert math.hypot(est_opp1[0] - prev_opp_slot1[0], est_opp1[1] - prev_opp_slot1[1]) <= 18.0
-            assert math.hypot(est_my2[0] - prev_my_slot2[0], est_my2[1] - prev_my_slot2[1]) <= 18.0
-
-        prev_opp_slot1 = est_opp1
-        prev_my_slot2 = est_my2
+    assert (sum(occlusion_errors_px) / len(occlusion_errors_px)) <= 10.0
+    # EMA smoothing must measurably reduce frame-to-frame jitter compared to raw noisy detections
+    mean_raw_jitter = sum(raw_step_deltas) / len(raw_step_deltas)
+    mean_ema_jitter = sum(ema_step_deltas) / len(ema_step_deltas)
+    assert mean_ema_jitter < mean_raw_jitter * 0.65
 
 
 def test_spatial_tracker_grace_expiry_marks_defeated_unit_cleanly() -> None:
-    """Verifies that absence >= 3.5s marks a defeated unit `alive=False` while re-appearing allies re-lock."""
+    """Verifies that absence >= 3.5s marks a defeated unit `alive=False`."""
     parser = StateParser()
     w, h = 1144, 640
     full_boxes: list[dict[str, float | int]] = [
@@ -244,19 +265,65 @@ def test_spatial_tracker_grace_expiry_marks_defeated_unit_cleanly() -> None:
     ]
 
     parser.parse_frame(MY_LINEUP, OPP_LINEUP, full_boxes, w, h, now=10.0)
-
-    # Remove Enemy Slot 1 (0.75 * w) permanently; keep all others visible
     post_ko_boxes = [
         b for b in full_boxes if not (b["cls"] == 0 and abs(float(b["cx"]) - w * 0.75) < 5.0)
     ]
 
-    # At t = 13.4s (delta = 3.4s < 3.5s): still protected by occlusion grace period
     _, opp_grace = parser.parse_frame(MY_LINEUP, OPP_LINEUP, post_ko_boxes, w, h, now=13.4)
     assert opp_grace["Slot 1"]["alive"] is True
     assert opp_grace["Slot 1"]["pos"] != (0, 0)
 
-    # At t = 13.6s (delta = 3.6s > 3.5s): grace expires -> unit marked defeated cleanly
     _, opp_ko = parser.parse_frame(MY_LINEUP, OPP_LINEUP, post_ko_boxes, w, h, now=13.6)
     assert opp_ko["Slot 1"]["alive"] is False
     assert opp_ko["Slot 1"]["pos"] == (0, 0)
     assert sum(1 for u in opp_ko.values() if u["alive"]) == 4
+
+
+def test_draft_ocr_scanner_min_confidence_filters_noise_without_dropping_picks() -> None:
+    """Verifies `min_confidence=0.65` drops low-score OCR hallucinations while preserving genuine picks."""
+
+    def fake_rapidocr(stitched_img: np.ndarray) -> tuple[list[Any], None]:
+        _h, total_w = stitched_img.shape[:2]
+        # Left column (x ~ 30) is ally ROI; right column (x ~ total_w - 150) is opponent ROI
+        opp_x = float(total_w - 150)
+        return (
+            [
+                # Genuine high-confidence Onmyoji UI text (>= 0.88)
+                ([[20.0, 40.0], [80.0, 40.0], [80.0, 70.0], [20.0, 70.0]], "不知火", 0.96),
+                ([[opp_x, 20.0], [opp_x + 90, 20.0], [opp_x + 90, 50.0], [opp_x, 50.0]], "禁用封陽君", 0.94),
+                # Low-confidence background cloud / border artifacts (< 0.65) that would cause false aliases
+                ([[25.0, 120.0], [55.0, 120.0], [55.0, 145.0], [25.0, 145.0]], "石長姬", 0.42),
+                ([[opp_x, 150.0], [opp_x + 60, 150.0], [opp_x + 60, 180.0], [opp_x, 180.0]], "季", 0.58),
+            ],
+            None,
+        )
+
+    scanner = DraftOcrScanner(ocr_callable=fake_rapidocr, min_confidence=0.65)
+    dummy_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    ocr_opp, ocr_my, invoked = scanner.scan_draft_rois(
+        screen_color=dummy_frame,
+        screen_gray=None,
+        is_active_state=True,
+        has_locked_opp_ban=False,
+        in_battle_five_picks=False,
+        now=10.0,
+    )
+    assert invoked is True
+    assert [r[1] for r in ocr_my] == ["不知火"]
+    assert [r[1] for r in ocr_opp] == ["禁用封陽君"]
+
+    # Feed filtered OCR output into DraftStateMachine to confirm normal Onmyoji Ban/Pick is unaffected
+    _, dict_map, multi_shorts, tags_db = get_public_demo_bundle()
+    repo = ShikigamiRepository(tags_db=tags_db, full_to_short_map=dict_map, multi_char_shorts=multi_shorts)
+    fsm = DraftStateMachine()
+    snap, skip = fsm.step(
+        ocr_opp=ocr_opp,
+        ocr_my=ocr_my,
+        sorted_full_to_short=repo.sorted_full_to_short,
+        my_ban="禪",
+        now=10.0,
+    )
+    assert skip is False
+    assert snap.opp_ban == "封"
+    assert snap.opp_draft == []

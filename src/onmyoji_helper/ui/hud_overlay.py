@@ -277,8 +277,8 @@ class BattleOverlayUI:
         try:
             if self.winfo_exists():
                 self.canvas.delete("all")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[BattleOverlayUI] Canvas clear skipped: {exc}")
 
     def close(self) -> None:
         self._last_rect = None
@@ -287,5 +287,5 @@ class BattleOverlayUI:
             if self.winfo_exists():
                 self.canvas.delete("all")
                 self.window.destroy()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[BattleOverlayUI] Overlay close skipped: {exc}")

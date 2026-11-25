@@ -15,9 +15,11 @@ Cython>=3.0.0
 PyInstaller>=6.0.0
 setuptools>=65.0.0
 
-# Quality Assurance & Testing
+# Quality Assurance, Coverage & Static Typing
 pytest>=8.0.0
+pytest-cov>=5.0.0
 ruff>=0.4.0
+mypy>=1.10.0
 
 # Optional Local LLM Inference Engine (Gemma-4 GGUF)
 llama-cpp-python>=0.2.70; sys_platform == 'win32'

@@ -123,8 +123,8 @@ class ModeController:
         if self.ui_app and hasattr(self.ui_app, "root") and hasattr(self.ui_app, "lbl_status"):
             try:
                 self.ui_app.root.after(0, lambda msg=text: self.ui_app.lbl_status.config(text=msg))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(f"[ModeController] Status bar update skipped: {exc}")
 
     def emergency_downgrade_to_yellow(self, reason: str = "") -> None:
         """Instantly halts Red Mode auto-clicking and switches to Yellow Mode without unloading VRAM."""
@@ -143,19 +143,21 @@ class ModeController:
         )
 
         if self.ui_app and hasattr(self.ui_app, "root"):
+            ui_ref = self.ui_app
+
             def _apply_ui() -> None:
                 try:
-                    self.ui_app.set_mode_ui(self.MODE_YELLOW)
-                    self.ui_app.enable_mode_click()
-                    if hasattr(self.ui_app, "lbl_status"):
-                        self.ui_app.lbl_status.config(text=status_msg)
-                except Exception:
-                    pass
+                    ui_ref.set_mode_ui(self.MODE_YELLOW)
+                    ui_ref.enable_mode_click()
+                    if hasattr(ui_ref, "lbl_status"):
+                        ui_ref.lbl_status.config(text=status_msg)
+                except Exception as exc:
+                    logger.debug(f"[ModeController] Emergency UI widget update skipped: {exc}")
 
             try:
-                self.ui_app.root.after(0, _apply_ui)
-            except Exception:
-                pass
+                ui_ref.root.after(0, _apply_ui)
+            except Exception as exc:
+                logger.debug(f"[ModeController] Emergency UI schedule skipped: {exc}")
 
     def handle_five_picks(
         self,

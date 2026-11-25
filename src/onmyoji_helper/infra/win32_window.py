@@ -125,8 +125,8 @@ def focus_game_root_window(hwnd: int) -> bool:
             win32gui.SetForegroundWindow(root_hwnd)
             if get_root_hwnd(win32gui.GetForegroundWindow()) == root_hwnd:
                 return True
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"[Win32Window] Direct SetForegroundWindow deferred to AttachThreadInput: {exc}")
 
         fg_hwnd = win32gui.GetForegroundWindow()
         fg_tid = win32process.GetWindowThreadProcessId(fg_hwnd)[0] if fg_hwnd else 0
@@ -142,8 +142,8 @@ def focus_game_root_window(hwnd: int) -> bool:
             if attached and _user32 is not None:
                 try:
                     _user32.AttachThreadInput(fg_tid, target_tid, False)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(f"[Win32Window] AttachThreadInput detach note: {exc}")
     except Exception as exc:
         logger.debug(f"⚠️ [Win32Window] 自動交還遊戲焦點失敗: {exc}")
         return False
