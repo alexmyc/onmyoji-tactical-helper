@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "onmyoji-tactical-helper"
 version = "2.0.0"
-description = "Hybrid Edge-AI Tactical Assistant & Safety-Critical Executor for Onmyoji (YOLOv8 + RapidOCR + Gemma-4 GGUF + XMind Decision Tree)"
+description = "Real-Time Multimodal Tactical Decision Support & Desktop Automation Research Platform (YOLOv8n + RapidOCR + Gemma-4 GGUF + XMind Counter-Tree)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
