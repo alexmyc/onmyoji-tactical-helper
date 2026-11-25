@@ -1,8 +1,8 @@
 """Shikigami Knowledge Repository for Onmyoji Tactical Helper.
 
 Consolidates full-to-short name normalization, multi-character token ordering, and
-cached mechanism/tag lookups for all 251+ shikigami, eliminating duplicate O(N log N)
-key sorting across `battle_context` and `target_selector`.
+cached mechanism/tag lookups for all 251+ shikigami, enforcing exact-match priority and
+bounded root-containment rules to prevent short-token false positives.
 """
 
 from functools import lru_cache
@@ -25,6 +25,32 @@ DEFAULT_TAG_METADATA: dict[str, Any] = {
     "skill_details": {},
 }
 
+_GENERIC_ASCII_PREFIXES: frozenset[str] = frozenset({"sp", "ssr", "sr"})
+_MIN_CONTAINMENT_RATIO: float = 0.33
+
+
+def _is_meaningful_root_match(key: str, query: str) -> bool:
+    """Checks whether `key` and `query` share a safe, non-trivial root containment relationship.
+
+    Rules:
+    1. Both `key` and `query` must have length >= 2 (single-character names must match via
+       exact lookup or explicit `full_to_short_map` alias, never via arbitrary substring).
+    2. Pure generic rarity prefixes ('SP', 'SSR', 'SR') are rejected as standalone roots.
+    3. Overlap length must be >= 33% of the longer string (`len(shorter) / len(longer) >= 0.33`)
+       so 2-character roots match 4..6 char shikigami names ('追月' <-> '流光追月神') without
+       contaminating unrelated long phrases.
+    """
+    if len(key) < 2 or len(query) < 2:
+        return False
+    shorter, longer = (key, query) if len(key) <= len(query) else (query, key)
+    if shorter.lower() in _GENERIC_ASCII_PREFIXES:
+        return False
+    if shorter.isascii() and len(shorter) < 3:
+        return False
+    if shorter not in longer:
+        return False
+    return (len(shorter) / float(len(longer))) >= _MIN_CONTAINMENT_RATIO
+
 
 class ShikigamiRepository:
     """In-memory indexed repository for shikigami aliases and combat mechanism tags."""
@@ -35,13 +61,7 @@ class ShikigamiRepository:
         full_to_short_map: dict[str, str] | None = None,
         multi_char_shorts: list[str] | None = None,
     ) -> None:
-        """Initializes the repository and pre-sorts lookup keys by descending length.
-
-        Args:
-            tags_db: Mapping from shikigami name to combat role, priority, and skill metadata.
-            full_to_short_map: Mapping from full OCR name to canonical shorthand.
-            multi_char_shorts: List of multi-character shorthand tokens (e.g. 'SP06', '酒吞').
-        """
+        """Initializes the repository and pre-sorts lookup keys by descending length."""
         self._tags_db: dict[str, dict[str, Any]] = dict(tags_db or {})
         self._sorted_tag_keys: tuple[str, ...] = tuple(
             sorted(self._tags_db.keys(), key=len, reverse=True)
@@ -54,8 +74,11 @@ class ShikigamiRepository:
         self.sorted_multi_shorts: tuple[str, ...] = tuple(
             sorted(set(multi_char_shorts or []), key=len, reverse=True)
         )
+        self._short_to_full_candidates: dict[str, list[str]] = {}
+        for full_name, short_name in self.sorted_full_to_short:
+            if short_name:
+                self._short_to_full_candidates.setdefault(short_name, []).append(full_name)
 
-        # Bound per-instance LRU lookup cache
         self._cached_lookup = lru_cache(maxsize=512)(self._lookup_uncached)
 
     @property
@@ -69,20 +92,36 @@ class ShikigamiRepository:
         self._sorted_tag_keys = tuple(sorted(self._tags_db.keys(), key=len, reverse=True))
         self._cached_lookup.cache_clear()
 
-    def _lookup_uncached(self, clean_name: str) -> dict[str, Any]:
-        """Resolves raw tag dictionary entry via exact match followed by length-ordered match."""
-        matched_data: dict[str, Any] | None = None
+    def _resolve_raw_entry(self, clean_name: str) -> dict[str, Any] | None:
+        # 1. Strict exact match
         if clean_name in self._tags_db:
-            matched_data = self._tags_db[clean_name]
-        else:
-            for key in self._sorted_tag_keys:
-                if key == clean_name:
-                    matched_data = self._tags_db[key]
-                    break
-                if len(key) >= 2 and (key in clean_name or clean_name in key):
-                    matched_data = self._tags_db[key]
-                    break
+            return self._tags_db[clean_name]
 
+        # 2. Exact alias resolution via full_to_short_map (full -> short and short -> full)
+        alias_short = self.full_to_short_map.get(clean_name)
+        if alias_short and alias_short in self._tags_db:
+            return self._tags_db[alias_short]
+        for full_cand in self._short_to_full_candidates.get(clean_name, ()):
+            if full_cand in self._tags_db:
+                return self._tags_db[full_cand]
+
+        # 3. Prefer prefix/suffix root containment first (longest key wins)
+        for key in self._sorted_tag_keys:
+            if _is_meaningful_root_match(key, clean_name):
+                shorter, longer = (key, clean_name) if len(key) <= len(clean_name) else (clean_name, key)
+                if longer.startswith(shorter) or longer.endswith(shorter):
+                    return self._tags_db[key]
+
+        # 4. Bounded interior root containment (e.g. '追月' <-> '流光追月神', longest key wins)
+        for key in self._sorted_tag_keys:
+            if _is_meaningful_root_match(key, clean_name):
+                return self._tags_db[key]
+
+        return None
+
+    def _lookup_uncached(self, clean_name: str) -> dict[str, Any]:
+        """Resolves raw tag dictionary entry with exact, alias, and bounded-root precedence."""
+        matched_data = self._resolve_raw_entry(clean_name)
         if not isinstance(matched_data, dict):
             return dict(DEFAULT_TAG_METADATA)
 
@@ -111,14 +150,7 @@ class ShikigamiRepository:
         }
 
     def get_tag_info(self, name: str | None) -> dict[str, Any]:
-        """Retrieves normalized combat metadata for a shikigami in O(1) amortized time.
-
-        Args:
-            name: Shikigami full or short name string.
-
-        Returns:
-            Normalized metadata dictionary with guaranteed schema keys.
-        """
+        """Retrieves normalized combat metadata for a shikigami in O(1) amortized time."""
         if (
             not name
             or name == UNKNOWN_SHIKIGAMI

@@ -280,27 +280,35 @@ def test_spatial_tracker_grace_expiry_marks_defeated_unit_cleanly() -> None:
 
 
 def test_draft_ocr_scanner_min_confidence_filters_noise_without_dropping_picks() -> None:
-    """Verifies `min_confidence=0.65` drops low-score OCR hallucinations while preserving genuine picks."""
+    """Verifies two-tier OCR filtering: drops <0.65 noise while keeping 0.35..0.65 single-char shikigami."""
 
     def fake_rapidocr(stitched_img: np.ndarray) -> tuple[list[Any], None]:
         _h, total_w = stitched_img.shape[:2]
-        # Left column (x ~ 30) is ally ROI; right column (x ~ total_w - 150) is opponent ROI
         opp_x = float(total_w - 150)
         return (
             [
-                # Genuine high-confidence Onmyoji UI text (>= 0.88)
+                # High-confidence multi-char Onmyoji UI text (>= 0.65)
                 ([[20.0, 40.0], [80.0, 40.0], [80.0, 70.0], [20.0, 70.0]], "不知火", 0.96),
                 ([[opp_x, 20.0], [opp_x + 90, 20.0], [opp_x + 90, 50.0], [opp_x, 50.0]], "禁用封陽君", 0.94),
-                # Low-confidence background cloud / border artifacts (< 0.65) that would cause false aliases
-                ([[25.0, 120.0], [55.0, 120.0], [55.0, 145.0], [25.0, 145.0]], "石長姬", 0.42),
-                ([[opp_x, 150.0], [opp_x + 60, 150.0], [opp_x + 60, 180.0], [opp_x, 180.0]], "季", 0.58),
+                # Genuine single-character shikigami "季" scoring 0.58 (common 0.40..0.65 single-glyph score) -> MUST KEEP
+                ([[opp_x, 95.0], [opp_x + 40.0, 95.0], [opp_x + 40.0, 125.0], [opp_x, 125.0]], "季", 0.58),
+                # Low-confidence random OCR noise / garbled artifacts (< 0.65 and not in whitelist) -> MUST DROP
+                ([[25.0, 120.0], [55.0, 120.0], [55.0, 145.0], [25.0, 145.0]], "※亂碼#", 0.42),
+                ([[opp_x, 150.0], [opp_x + 60, 150.0], [opp_x + 60, 180.0], [opp_x, 180.0]], "@_紋路", 0.52),
+                # Extremely low score (< 0.35) even on a known glyph -> MUST DROP
+                ([[25.0, 170.0], [55.0, 170.0], [55.0, 195.0], [25.0, 195.0]], "瀧", 0.21),
             ],
             None,
         )
 
-    scanner = DraftOcrScanner(ocr_callable=fake_rapidocr, min_confidence=0.65)
+    scanner = DraftOcrScanner(
+        ocr_callable=fake_rapidocr,
+        min_confidence=0.65,
+        known_token_min_confidence=0.35,
+    )
     dummy_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
 
+    # Frame 1: Lock Ban [封] while ignoring garbled noise
     ocr_opp, ocr_my, invoked = scanner.scan_draft_rois(
         screen_color=dummy_frame,
         screen_gray=None,
@@ -311,19 +319,28 @@ def test_draft_ocr_scanner_min_confidence_filters_noise_without_dropping_picks()
     )
     assert invoked is True
     assert [r[1] for r in ocr_my] == ["不知火"]
-    assert [r[1] for r in ocr_opp] == ["禁用封陽君"]
+    assert [r[1] for r in ocr_opp] == ["禁用封陽君", "季"]
 
-    # Feed filtered OCR output into DraftStateMachine to confirm normal Onmyoji Ban/Pick is unaffected
     _, dict_map, multi_shorts, tags_db = get_public_demo_bundle()
     repo = ShikigamiRepository(tags_db=tags_db, full_to_short_map=dict_map, multi_char_shorts=multi_shorts)
     fsm = DraftStateMachine()
-    snap, skip = fsm.step(
+    snap1, skip1 = fsm.step(
         ocr_opp=ocr_opp,
         ocr_my=ocr_my,
         sorted_full_to_short=repo.sorted_full_to_short,
         my_ban="禪",
         now=10.0,
     )
-    assert skip is False
-    assert snap.opp_ban == "封"
-    assert snap.opp_draft == []
+    assert skip1 is False
+    assert snap1.opp_ban == "封"
+
+    # Frame 2 (after Ban header disappears): single-char "季" @ 0.58 is registered as Enemy Pick 1!
+    snap2, _ = fsm.step(
+        ocr_opp=[r for r in ocr_opp if "禁用" not in r[1]],
+        ocr_my=ocr_my,
+        sorted_full_to_short=repo.sorted_full_to_short,
+        my_ban="禪",
+        now=11.0,
+    )
+    assert snap2.opp_draft == ["季"]
+    assert snap2.my_draft == ["離"]

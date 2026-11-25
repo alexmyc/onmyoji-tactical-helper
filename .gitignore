@@ -31,10 +31,12 @@ logs/
 *.tmp
 *.lnk
 
-# Local AI model weights (excluded from Git; bundled into data/ during release build)
+# Local AI model weights & raw training runs (excluded from Git; curated metrics live in docs/model_artifacts/)
 *.pt
 *.onnx
 *.gguf
+yys_model/
+YYS model/
 
 # Testing & static analysis caches
 .pytest_cache/

@@ -2,12 +2,12 @@
 
 *Combining custom YOLOv8n 2D-affine spatial tracking, RapidOCR, rule-based dependency-aware XMind decision trees, and local quantized Gemma-4 LLM inference within a production-oriented 7-layer modular desktop architecture.*
 
+[![CI](https://github.com/alexmyc/onmyoji-tactical-helper/actions/workflows/ci.yml/badge.svg)](https://github.com/alexmyc/onmyoji-tactical-helper/actions/workflows/ci.yml)
 [![Release v1.0.0](https://img.shields.io/badge/Release-v1.0.0-2EA043)](https://github.com/alexmyc/onmyoji-tactical-helper/releases/tag/v1.0.0)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![YOLOv8n](https://img.shields.io/badge/Vision-YOLOv8n%20%2B%202D%20Affine-00B4D8)](https://github.com/ultralytics/ultralytics)
+[![YOLOv8n](https://img.shields.io/badge/Vision-YOLOv8n%20%2B%202D%20Affine-00B4D8)](docs/model_artifacts/)
 [![Gemma-4 GGUF](https://img.shields.io/badge/Edge%20LLM-Gemma--4%20GGUF-FF6F00)](https://github.com/abetlen/llama-cpp-python)
 [![RapidOCR](https://img.shields.io/badge/OCR-RapidOCR%20DirectML-2ECC71)](https://github.com/RapidAI/RapidOCR)
-[![Pytest](https://img.shields.io/badge/Tests-26%20Passed%20Offline-0A9EDC?logo=pytest&logoColor=white)](tests/)
 [![Mypy & Ruff](https://img.shields.io/badge/QA-Ruff%20%2B%20Mypy%20Checked-D7FF64?logo=ruff&logoColor=black)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -37,7 +37,7 @@
 ## Key Engineering Highlights
 
 - **Multimodal Edge-AI Perception & Reasoning**
-  - **Ban/Pick Drafting Phase**: Pairs horizontally stitched dual-column `RapidOCR` (`min_confidence=0.65` noise filtering, DirectML/CPU isolated) with a deterministic `DraftStateMachine` enforcing a strict **Ban Hard-Gate** before feeding a **rule-based, dependency-aware XMind Counter Engine** (`ordered 5-step ally backbones` + `order-invariant enemy sets` + `dead-branch viability decay` + `mirror/copycat playbook detection`).
+  - **Ban/Pick Drafting Phase**: Pairs horizontally stitched dual-column `RapidOCR` (two-tier whitelist confidence filtering: `0.65` general / `0.35` for single-character shikigami like `季`, `瀧`, `離`, `神`) with a deterministic `DraftStateMachine` enforcing a strict **Ban Hard-Gate** before feeding a **rule-based, dependency-aware XMind Counter Engine** (`ordered 5-step ally backbones` + `order-invariant enemy sets` + `dead-branch viability decay` + `mirror/copycat playbook detection`).
   - **5v5 Combat Phase**: Fuses **custom-trained `YOLOv8n`** unit detection, `cv2.estimateAffinePartial2D` camera-shake compensation, symmetric **3.5s ultimate-VFX occlusion EMA memory**, circumferential Sobel-verified `HoughCircles` turn/skill-slot geometry, and contrast-gated avatar template matching.
   - **Hardware-Tiered Local LLM**: Profiles CUDA VRAM and host RAM at runtime to offload **Gemma-4 (`Q4_K_M` GGUF)** onto NVIDIA GPUs or fall back transparently to a zero-latency, zero-VRAM symbolic rule engine.
 
@@ -50,7 +50,7 @@
   - Implements **deterministic fail-safe guardrails**: smoothstep cursor interpolation with UI hover stabilization (`35–50 ms` `MOUSEEVENTF_MOVE` hover pulse for reliable hitbox registration), unified 2-step skill dispatch (`[unit lock] -> [skill cast]`) with automatic `S1` fallback on orb shortage, UIPI privilege-mismatch inspection, and **human-in-the-loop override controls** (`SafetyGuard` polls `F12` / `ESC` every `50 ms`, while `Win32Input` checks for `> 95 px` manual cursor takeover between interpolation steps).
 
 - **Dual-Track Data Isolation & Native `.pyd` Packaging**
-  - **Public Sandbox vs. Private Cloud Sync**: Public Sandbox Mode (`--demo` or default when `.env` is absent) bundles **25 curated sample aliases, 13 shikigami combat profiles, and 2 sample playbooks** (`public_demo_data.py`) for instant zero-config evaluation; configuring an untracked local `.env` dynamically syncs the full **1,128-entry alias dictionary and 251 shikigami tag profiles** from external Google Sheets.
+  - **Public Sandbox vs. Private Cloud Sync**: Public Sandbox Mode (`--demo` or default when `.env` is absent) bundles **27 curated sample aliases, 13 shikigami combat profiles, and 2 sample playbooks** (`public_demo_data.py`) for instant zero-config evaluation; configuring an untracked local `.env` dynamically syncs the full **1,128-entry alias dictionary and 251 shikigami tag profiles** from external Google Sheets.
   - **Native Binary Compilation (Source Obfuscation & Packaging)**: `build_release.py` compiles all **33 layered package modules** sequentially in isolated child processes via **Cython 3.3 + MSVC** (`/O2 /DNDEBUG`, `/DEBUG:NONE`, stripped docstrings and C line traces) into Windows `.pyd` C-extensions packaged as `OnmyojiHelper.exe` + `data/`.
 
 ---
@@ -74,14 +74,14 @@ flowchart TB
     end
 
     subgraph Vision["vision/ — Multimodal Perception"]
-        OCR["DraftOcrScanner\n(Dual-Column Stitch + Motion-Diff + Conf>=0.65)"]
+        OCR["DraftOcrScanner\n(Dual-Column Stitch + 0.65/0.35 Whitelist Gate)"]
         Tracker["StateParser\n(YOLOv8n + 2D Partial Affine + Symmetric EMA)"]
         TurnDet["TurnDetector\n(CLAHE + HoughCircles + Sobel Ring + HSV)"]
         ActBar["ActionBarDetector\n(Contrast-Gated Avatar Matching)"]
     end
 
     subgraph Decision["decision/ & domain/ — Symbolic & Neural Reasoning"]
-        Repo["ShikigamiRepository\n(Sandbox: 25 Aliases · Private .env: 1,128 / 251 Tags)"]
+        Repo["ShikigamiRepository\n(Sandbox: ~25 Aliases · Private .env: 1,128 / 251 Tags)"]
         FSM["DraftStateMachine\n(Strict Ban Hard-Gate + 1..5 Picks)"]
         Tree["XMind DraftEngine\n(Ordered Backbone + Mirror Detection)"]
         Select["TargetSelector & BattleContextBuilder"]
@@ -113,18 +113,21 @@ flowchart TB
 
 ---
 
-## Benchmarks & Model Accuracy Metrics
+## Verifiable `YOLOv8n` Training Artifacts & Performance Benchmarks
 
-### 1. Detection, Tracking & Recognition Accuracy
-Unit detection uses an externally trained **`YOLOv8n`** checkpoint (`best.pt`, `5.9 MB`, `imgsz=640`, `150 epochs`, classes `{0: enemy, 1: ally}`), trained with domain-specific heavy lighting and overlap augmentations (`mosaic=1.0`, `hsv_h=0.015`, `hsv_s=0.70`, `hsv_v=0.40`, `translate=0.10`, `scale=0.20`, `fliplr=0.50`).  
-*(Note: Both `best.pt` model weights and the annotated combat dataset are standalone external training artifacts excluded from this public repository; all 26 automated tests execute deterministically on synthetic frames.)*
+### 1. Detection, Tracking & Recognition Metrics
+Full Ultralytics training configuration ([args.yaml](docs/model_artifacts/args.yaml)), per-epoch logs ([results.csv](docs/model_artifacts/results.csv)), label distribution ([labels.jpg](docs/model_artifacts/labels.jpg)), PR/F1 curves ([BoxPR_curve.png](docs/model_artifacts/BoxPR_curve.png), [BoxF1_curve.png](docs/model_artifacts/BoxF1_curve.png)), and confusion matrices ([confusion_matrix.png](docs/model_artifacts/confusion_matrix.png), [confusion_matrix_normalized.png](docs/model_artifacts/confusion_matrix_normalized.png)) are archived in [`docs/model_artifacts/`](docs/model_artifacts/) (binary `.pt` weights and raw screenshot datasets remain git-ignored).
 
-| Perception / Reasoning Module | Validation / Regression Metric | Technical Design Note |
+- **Dataset & Train/Val Split**: Focused isometric 5v5 PvP dataset comprising **16 training scenes (`121` annotated unit boxes: `62 enemy`, `59 ally`; `batch=4`, `imgsz=640`)** and a held-out **validation split (`20` unit boxes: `10 enemy`, `10 ally`)**. Transfer-trained from `yolov8n.pt` for `150 epochs` (`110.1s` on CUDA) using `randaugment`, `mosaic=1.0` (`close_mosaic=10`), `erasing=0.4`, `hsv_h=0.015, hsv_s=0.70, hsv_v=0.40`, `translate=0.10, scale=0.20, fliplr=0.50`. Best checkpoint selected at **Epoch 98**.
+
+![YOLOv8n 150-Epoch Training and Validation Curves](docs/model_artifacts/results.png)
+
+| Perception / Reasoning Module | Verifiable Metric | Technical Design Note |
 | :--- | :---: | :--- |
-| **`YOLOv8n` 5v5 Unit Detector (`best.pt`)** | **`mAP@50`: `99.5%`** · **`Precision`: `89.0%`** · **`Recall`: `93.5%`** · **`mAP@50-95`: `60.1%`** | Bounding-box IoU variance from ornate skins and particle halos (`mAP@50-95`) is stabilized downstream by EMA smoothing and affine slot anchors |
+| **`YOLOv8n` 5v5 Unit Detector (Epoch 98)** | **`mAP@50`: `99.5%`** · **`Precision`: `89.0%`** · **`Recall`: `93.5%`** · **`mAP@50-95`: `60.1%`** | Exact row 98 in [results.csv](docs/model_artifacts/results.csv); tight-IoU variance from ornate skins/halos is smoothed downstream by EMA + affine slot anchors |
 | **Noisy 2D Affine + `3.5s` Occlusion Tracker (`StateParser`)** | **`100%` slot retention** (`< 10 px` mean error under `±4 px` jitter + dropouts) | `cv2.estimateAffinePartial2D` + EMA suppresses detection jitter by `> 35%` and bridges `< 3.5s` ultimate-VFX blackouts (`tests/test_vision_synthetic_regression.py`) |
 | **Turn & Skill-Bar Verifier (`TurnDetector`)** | **16-pt Sobel ring (`>= 7/16` hits) + HSV gate** | Rejects full-screen flashbang washouts (`0` false triggers in synthetic regression) while resolving 3- vs. 4-skill button layouts |
-| **Draft `RapidOCR` + Confidence & Alias Gate** | **`1.30x` linear ROI upscale + `min_confidence=0.65`** | Dual-column stitched pass drops `< 0.65` background noise before length-descending alias matching (`25` built-in demo aliases; `1,128` via private `.env`) |
+| **Draft `RapidOCR` Whitelist Gate** | **`1.30x` linear ROI upscale + `0.65 / 0.35` two-tier gate** | Drops `< 0.65` background noise while preserving `0.35..0.65` single-char shikigami (`季`, `瀧`, `離`, `神`) prior to bounded alias matching |
 
 ### 2. Reproducible Offline Microbenchmarks (`P50 / P95 / P99`)
 Measured offline on Python `3.12.1` (`Windows x64`) via [scripts/run_benchmarks.py](scripts/run_benchmarks.py) — reproduce locally anytime with `python scripts/run_benchmarks.py` (raw output in [docs/BENCHMARKS.json](docs/BENCHMARKS.json)):
@@ -162,10 +165,11 @@ python run_app.py --demo
 ```
 Opens the **Draft Window**, **AI Tactical Panel**, and **Interactive Match Sandbox** side-by-side using the built-in Public Sandbox dataset (`~25` sample aliases, `2` playbooks) with real-time English inspector telemetry.
 
-### 2. Run QA Gate (Tests, Coverage, Type Check, Linter & Benchmarks)
-All **26** unit, end-to-end, and synthetic noisy-CV regression tests execute offline:
+### 2. Run QA Gate (Tests, `>=70%` Core Coverage, Mypy, Ruff & Benchmarks)
+Install QA/development tools from `requirements-dev.txt` and run all **29** offline tests:
 ```powershell
-pytest -v --cov=onmyoji_helper --cov-report=term-missing
+pip install -r requirements-dev.txt
+pytest -v --cov=onmyoji_helper --cov-report=term-missing --cov-fail-under=70
 mypy src
 ruff check src tests scripts run_app.py build_release.py
 python scripts/run_benchmarks.py
@@ -191,16 +195,18 @@ Generates `dist\OnmyojiHelper\` containing **`OnmyojiHelper.exe`** and **`data\`
 
 ```text
 onmyoji-tactical-helper/
-├── README.md                          # System overview, live previews, accuracy & P50/P95 benchmarks
+├── README.md                          # System overview, live previews, YOLOv8n curves & benchmarks
 ├── .env.example                       # Optional private cloud sync & license config template
+├── requirements.txt                   # Pure runtime dependencies
+├── requirements-dev.txt               # QA, test coverage, typing & native packaging tools
+├── pyproject.toml                     # PEP 621 metadata (v1.0.0) + Ruff, Mypy & Coverage config
 ├── docs/
 │   ├── ARCHITECTURE.md                # System Architecture Guide (math models, CV & concurrency)
 │   ├── BENCHMARKS.json                # Reproducible P50 / P95 / P99 offline latency measurements
+│   ├── model_artifacts/               # Verifiable YOLOv8n args.yaml, results.csv, PR/F1 & matrices
 │   └── image/                         # Live 125% DPI Yellow & Red Mode HUD screenshots
 ├── scripts/
 │   └── run_benchmarks.py              # Reproducible latency benchmark harness
-├── pyproject.toml                     # PEP 621 metadata + Ruff, Mypy & Pytest configuration
-├── requirements.txt                   # Runtime, packaging, coverage & static-typing dependencies
 ├── run_app.py                         # Pre-import DPI & conditional UAC bootstrapper
 ├── build_release.py                   # Low-RAM Cython 3.3 .pyd compiler & PyInstaller packager
 ├── src/
@@ -212,8 +218,8 @@ onmyoji-tactical-helper/
 │       ├── infra/                     # EnvLoader, Win32 APIs, BitBlt, XOR cache sync & VRAM guard
 │       ├── ui/                        # MainWindow, AITacticalUI, BattleOverlayUI & DemoSandbox
 │       └── app/                       # Runtime bootstrap, ModeController & BattleCoordinator
-├── tests/                             # Offline unit, E2E & noisy synthetic CV suite (26 tests)
-└── .github/workflows/ci.yml           # GitHub Actions CI (Ruff + Mypy + Pytest Coverage)
+├── tests/                             # Offline unit, E2E & noisy synthetic CV suite (29 tests)
+└── .github/workflows/ci.yml           # GitHub Actions CI (Ruff + Mypy + Pytest >=70% Coverage)
 ```
 
 ---
