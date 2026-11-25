@@ -37,7 +37,7 @@
 ## Key Engineering Highlights
 
 - **Multimodal Edge-AI Perception & Reasoning**
-  - **Ban/Pick Drafting Phase**: Pairs horizontally stitched dual-column `RapidOCR` (two-tier whitelist confidence filtering: `0.65` general / `0.35` for single-character shikigami like `季`, `瀧`, `離`, `神`) with a deterministic `DraftStateMachine` enforcing a strict **Ban Hard-Gate** before feeding a **rule-based, dependency-aware XMind Counter Engine** (`ordered 5-step ally backbones` + `order-invariant enemy sets` + `dead-branch viability decay` + `mirror/copycat playbook detection`).
+  - **Ban/Pick Drafting Phase**: Pairs horizontally stitched dual-column `RapidOCR` with **two-tier + 2-frame temporal consistency filtering** (`>= 0.65` immediate pass; `0.35..0.65` repository-injected tokens such as `季` or `瀧` require `2` consecutive frames to eliminate single-frame background hallucinations) and a deterministic `DraftStateMachine` enforcing a strict **Ban Hard-Gate** ahead of a **rule-based, dependency-aware XMind Counter Engine**.
   - **5v5 Combat Phase**: Fuses **custom-trained `YOLOv8n`** unit detection, `cv2.estimateAffinePartial2D` camera-shake compensation, symmetric **3.5s ultimate-VFX occlusion EMA memory**, circumferential Sobel-verified `HoughCircles` turn/skill-slot geometry, and contrast-gated avatar template matching.
   - **Hardware-Tiered Local LLM**: Profiles CUDA VRAM and host RAM at runtime to offload **Gemma-4 (`Q4_K_M` GGUF)** onto NVIDIA GPUs or fall back transparently to a zero-latency, zero-VRAM symbolic rule engine.
 
@@ -49,9 +49,9 @@
   - Shares a single physical coordinate projection (`project_cropped_to_physical_client`) across the click-through HUD (`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE`) and UI dispatch layer—maintaining 1:1 pixel alignment across `100% / 125% / 150% / 200%` DWM DPI scaling, `16:10` letterboxes, and negative-coordinate multi-monitor desktops.
   - Implements **deterministic fail-safe guardrails**: smoothstep cursor interpolation with UI hover stabilization (`35–50 ms` `MOUSEEVENTF_MOVE` hover pulse for reliable hitbox registration), unified 2-step skill dispatch (`[unit lock] -> [skill cast]`) with automatic `S1` fallback on orb shortage, UIPI privilege-mismatch inspection, and **human-in-the-loop override controls** (`SafetyGuard` polls `F12` / `ESC` every `50 ms`, while `Win32Input` checks for `> 95 px` manual cursor takeover between interpolation steps).
 
-- **Dual-Track Data Isolation & Native `.pyd` Packaging**
+- **Dual-Track Data Isolation & Credential-Free Default Packaging**
   - **Public Sandbox vs. Private Cloud Sync**: Public Sandbox Mode (`--demo` or default when `.env` is absent) bundles **27 curated sample aliases, 13 shikigami combat profiles, and 2 sample playbooks** (`public_demo_data.py`) for instant zero-config evaluation; configuring an untracked local `.env` dynamically syncs the full **1,128-entry alias dictionary and 251 shikigami tag profiles** from external Google Sheets.
-  - **Native Binary Compilation (Source Obfuscation & Packaging)**: `build_release.py` compiles all **33 layered package modules** sequentially in isolated child processes via **Cython 3.3 + MSVC** (`/O2 /DNDEBUG`, `/DEBUG:NONE`, stripped docstrings and C line traces) into Windows `.pyd` C-extensions packaged as `OnmyojiHelper.exe` + `data/`.
+  - **Native Binary Compilation (Source Obfuscation & Packaging)**: `build_release.py` compiles all **33 layered package modules** sequentially in isolated child processes via **Cython 3.3 + MSVC** (`/O2 /DNDEBUG`, `/DEBUG:NONE`) into Windows `.pyd` C-extensions, excluding any local `.env` by default unless `--include-local-env` is explicitly specified.
 
 ---
 
@@ -74,14 +74,14 @@ flowchart TB
     end
 
     subgraph Vision["vision/ — Multimodal Perception"]
-        OCR["DraftOcrScanner\n(Dual-Column Stitch + 0.65/0.35 Whitelist Gate)"]
+        OCR["DraftOcrScanner\n(Dual-Column Stitch + 2-Frame Temporal Gate)"]
         Tracker["StateParser\n(YOLOv8n + 2D Partial Affine + Symmetric EMA)"]
         TurnDet["TurnDetector\n(CLAHE + HoughCircles + Sobel Ring + HSV)"]
         ActBar["ActionBarDetector\n(Contrast-Gated Avatar Matching)"]
     end
 
     subgraph Decision["decision/ & domain/ — Symbolic & Neural Reasoning"]
-        Repo["ShikigamiRepository\n(Sandbox: ~25 Aliases · Private .env: 1,128 / 251 Tags)"]
+        Repo["ShikigamiRepository\n(Sandbox: 27 Aliases · Private .env: 1,128 / 251 Tags)"]
         FSM["DraftStateMachine\n(Strict Ban Hard-Gate + 1..5 Picks)"]
         Tree["XMind DraftEngine\n(Ordered Backbone + Mirror Detection)"]
         Select["TargetSelector & BattleContextBuilder"]
@@ -97,6 +97,7 @@ flowchart TB
 
     Env --> Sync
     Game --> Cap
+    Repo -.->|known_ocr_tokens| OCR
     Cap -->|Draft Frames| OCR --> FSM --> Tree --> HUD
     Sync --> Repo & Tree
     Cap -->|5v5 Combat Frames| Tracker & TurnDet & ActBar
@@ -118,28 +119,31 @@ flowchart TB
 ### 1. Detection, Tracking & Recognition Metrics
 Full Ultralytics training configuration ([args.yaml](docs/model_artifacts/args.yaml)), per-epoch logs ([results.csv](docs/model_artifacts/results.csv)), label distribution ([labels.jpg](docs/model_artifacts/labels.jpg)), PR/F1 curves ([BoxPR_curve.png](docs/model_artifacts/BoxPR_curve.png), [BoxF1_curve.png](docs/model_artifacts/BoxF1_curve.png)), and confusion matrices ([confusion_matrix.png](docs/model_artifacts/confusion_matrix.png), [confusion_matrix_normalized.png](docs/model_artifacts/confusion_matrix_normalized.png)) are archived in [`docs/model_artifacts/`](docs/model_artifacts/) (binary `.pt` weights and raw screenshot datasets remain git-ignored).
 
-- **Dataset & Train/Val Split**: Focused isometric 5v5 PvP dataset comprising **16 training scenes (`121` annotated unit boxes: `62 enemy`, `59 ally`; `batch=4`, `imgsz=640`)** and a held-out **validation split (`20` unit boxes: `10 enemy`, `10 ally`)**. Transfer-trained from `yolov8n.pt` for `150 epochs` (`110.1s` on CUDA) using `randaugment`, `mosaic=1.0` (`close_mosaic=10`), `erasing=0.4`, `hsv_h=0.015, hsv_s=0.70, hsv_v=0.40`, `translate=0.10, scale=0.20, fliplr=0.50`. Best checkpoint selected at **Epoch 98**.
+- **Dataset & Validation Split Disclosure**: Compact isometric 5v5 PvP dataset comprising **16 training scenes (`121` annotated unit boxes: `62 enemy`, `59 ally`; `batch=4`, `imgsz=640`)** and a **validation split (`20` unit boxes: `10 enemy`, `10 ally`, which was also used to select the peak checkpoint rather than a separate held-out test set)**. Transfer-trained from `yolov8n.pt` for `150 epochs` (`110.1s` on CUDA) with `randaugment`, `mosaic=1.0` (`close_mosaic=10`), `erasing=0.4`, `hsv_h=0.015, hsv_s=0.70, hsv_v=0.40`, `translate=0.10, scale=0.20, fliplr=0.50`:
+  - **Peak Checkpoint — Epoch 98 (`best.pt`)**: **`mAP@50`: `99.5%`** · **`Precision`: `89.0%`** · **`Recall`: `93.5%`** · **`mAP@50-95`: `60.1%`**
+  - **Final Epoch — Epoch 150 (`last.pt`)**: **`mAP@50`: `94.4%`** · **`Precision`: `95.9%`** · **`Recall`: `87.4%`** · **`mAP@50-95`: `52.2%`**
 
 ![YOLOv8n 150-Epoch Training and Validation Curves](docs/model_artifacts/results.png)
 
 | Perception / Reasoning Module | Verifiable Metric | Technical Design Note |
 | :--- | :---: | :--- |
-| **`YOLOv8n` 5v5 Unit Detector (Epoch 98)** | **`mAP@50`: `99.5%`** · **`Precision`: `89.0%`** · **`Recall`: `93.5%`** · **`mAP@50-95`: `60.1%`** | Exact row 98 in [results.csv](docs/model_artifacts/results.csv); tight-IoU variance from ornate skins/halos is smoothed downstream by EMA + affine slot anchors |
+| **`YOLOv8n` 5v5 Unit Detector (`best.pt` / `last.pt`)** | **Peak Ep.98 `mAP@50`: `99.5%` (`mAP@50-95`: `60.1%`)** · **Final Ep.150 `mAP@50`: `94.4%` (`mAP@50-95`: `52.2%`)** | Validation split metrics in [results.csv](docs/model_artifacts/results.csv); tight-IoU variance from ornate skins/halos is smoothed downstream by EMA + affine slot anchors |
 | **Noisy 2D Affine + `3.5s` Occlusion Tracker (`StateParser`)** | **`100%` slot retention** (`< 10 px` mean error under `±4 px` jitter + dropouts) | `cv2.estimateAffinePartial2D` + EMA suppresses detection jitter by `> 35%` and bridges `< 3.5s` ultimate-VFX blackouts (`tests/test_vision_synthetic_regression.py`) |
 | **Turn & Skill-Bar Verifier (`TurnDetector`)** | **16-pt Sobel ring (`>= 7/16` hits) + HSV gate** | Rejects full-screen flashbang washouts (`0` false triggers in synthetic regression) while resolving 3- vs. 4-skill button layouts |
-| **Draft `RapidOCR` Whitelist Gate** | **`1.30x` linear ROI upscale + `0.65 / 0.35` two-tier gate** | Drops `< 0.65` background noise while preserving `0.35..0.65` single-char shikigami (`季`, `瀧`, `離`, `神`) prior to bounded alias matching |
+| **Draft `RapidOCR` Temporal Whitelist Gate** | **`>= 0.65` immediate · `0.35..0.65` 2-frame streak** | Filters single-frame background flickers (`火`, `白`) while confirming persistent single-char picks (`季`, `瀧`) across `2` consecutive scans |
 
-### 2. Reproducible Offline Microbenchmarks (`P50 / P95 / P99`)
+### 2. Reproducible Offline Microbenchmarks & End-to-End Pipeline Latency (`P50 / P95 / P99`)
 Measured offline on Python `3.12.1` (`Windows x64`) via [scripts/run_benchmarks.py](scripts/run_benchmarks.py) — reproduce locally anytime with `python scripts/run_benchmarks.py` (raw output in [docs/BENCHMARKS.json](docs/BENCHMARKS.json)):
 
 | Pipeline Stage (`scripts/run_benchmarks.py`) | P50 (ms) | P95 (ms) | P99 (ms) | Mean (ms) |
 | :--- | :---: | :---: | :---: | :---: |
-| **`xmind_counter_tree_scoring`** (viability decay + mirror check) | **`0.077`** | **`0.081`** | **`0.093`** | `0.077` |
-| **`shikigami_repo_lru_lookup`** (`@lru_cache` tag query) | **`< 0.001`** | **`0.001`** | **`0.001`** | `< 0.001` |
-| **`noisy_2d_affine_spatial_tracker`** (`±4 px` noise + affine + EMA) | **`0.322`** | **`0.359`** | **`0.387`** | `0.324` |
-| **`mixed_dpi_coordinate_projection`** (`125% DPI` + `16:10` letterbox) | **`0.004`** | **`0.007`** | **`0.007`** | `0.004` |
-| **`draft_roi_motion_diff_gate`** (`120×80` Gaussian absdiff gate) | **`0.025`** | **`0.040`** | **`0.045`** | `0.031` |
-| **`turn_detector_sobel_hsv_full_pass`** (`1280×720` Hough + Sobel + HSV) | **`2.787`** | **`3.623`** | **`4.416`** | `2.901` |
+| **`xmind_counter_tree_scoring`** (viability decay + mirror check) | **`0.065`** | **`0.066`** | **`0.096`** | `0.065` |
+| **`shikigami_repo_lru_lookup`** (`@lru_cache` tag query) | **`< 0.001`** | **`< 0.001`** | **`< 0.001`** | `< 0.001` |
+| **`noisy_2d_affine_spatial_tracker`** (`±4 px` noise + affine + EMA) | **`0.273`** | **`0.298`** | **`0.325`** | `0.273` |
+| **`mixed_dpi_coordinate_projection`** (`125% DPI` + `16:10` letterbox) | **`0.003`** | **`0.003`** | **`0.003`** | `0.003` |
+| **`draft_roi_motion_diff_gate`** (`120×80` Gaussian absdiff gate) | **`0.020`** | **`0.021`** | **`0.025`** | `0.020` |
+| **`turn_detector_sobel_hsv_full_pass`** (`1280×720` Hough + Sobel + HSV) | **`2.212`** | **`3.350`** | **`4.152`** | `2.377` |
+| **`e2e_synthetic_frame_to_hud`** (`1280×720` Frame -> CV + Rule + HUD + `125%` DPI) | **`2.538`** | **`3.425`** | **`4.230`** | `2.658` |
 
 *Live runtime reference (RTX 3080 Laptop GPU, `1920×1200 @ 125% DPI`): GDI `BitBlt` + border crop `~1.8 ms`, `YOLOv8n` forward pass `~8 ms` (CUDA `640px`) / `~28 ms` (CPU `480px`), `SafetyGuard` hotkey poll `50 ms`, idle background CPU `< 1.5%`.*
 
@@ -163,9 +167,9 @@ No game installation, external model weights, UAC elevation, or `.env` configura
 pip install -r requirements.txt
 python run_app.py --demo
 ```
-Opens the **Draft Window**, **AI Tactical Panel**, and **Interactive Match Sandbox** side-by-side using the built-in Public Sandbox dataset (`~25` sample aliases, `2` playbooks) with real-time English inspector telemetry.
+Opens the **Draft Window**, **AI Tactical Panel**, and **Interactive Match Sandbox** side-by-side using the built-in Public Sandbox dataset (`27` sample aliases, `13` combat profiles, `2` playbooks) with real-time English inspector telemetry.
 
-### 2. Run QA Gate (Tests, `>=70%` Core Coverage, Mypy, Ruff & Benchmarks)
+### 2. Run QA Gate (Tests, Coverage Transparency, Mypy, Ruff & Benchmarks)
 Install QA/development tools from `requirements-dev.txt` and run all **29** offline tests:
 ```powershell
 pip install -r requirements-dev.txt
@@ -174,20 +178,25 @@ mypy src
 ruff check src tests scripts run_app.py build_release.py
 python scripts/run_benchmarks.py
 ```
+- **Coverage Scope Transparency**: Headless CI enforces **`>= 70%`** coverage across the decoupled core decision, vision, domain, automation, and sync-parser layers (currently **`78.8%`** across `2,030` statements). Full-repository line coverage—when counting interactive Tkinter GUI windows, Win32 GDI/SendInput syscalls, and CUDA/GGUF model loaders (`4,258` total statements)—stands at **`47.3%`**.
 
 ### 3. Live HUD Execution & Optional Private Cloud Sync (`.env`)
-- **Public Sandbox Mode (Default)**: Launching `python run_app.py` without `.env` loads the built-in sample dataset (`public_demo_data.py`).
+- **Public Sandbox Mode (Default)**: Launching `python run_app.py` without `.env` loads the built-in sample dataset (`public_demo_data.py`: `27` aliases, `13` tags, `2` playbooks).
 - **Private Cloud Mode**: Copy `.env.example` to `.env` (git-ignored) and configure your Google Sheets IDs (`1,128` aliases / `251` unit tags) and license CSV URL. Launching `start.bat` or `python run_app.py` requests Windows UAC elevation (for inspecting elevated DirectX windows under Windows UIPI) and syncs your live tables.
 
 ### 4. Native Binary Compilation (`OnmyojiHelper.exe` + `data/`)
+Install build dependencies (`Cython` and `PyInstaller`) via `requirements-dev.txt` before packaging:
 ```powershell
-# Lite Build (0-VRAM rule tier, excludes 3 GB GGUF weights)
+pip install -r requirements.txt -r requirements-dev.txt
+
+# Clean Public / Credential-Free Lite Build (Default: copies .env.example only, never .env)
 python build_release.py
 
-# Full Build (Bundles local Gemma-4 GGUF weights + llama-cpp-python)
-python build_release.py --full
+# Private Personal Build (Explicitly bundles local .env into data/.env; optional --full adds 3 GB GGUF)
+python build_release.py --include-local-env
+python build_release.py --full --include-local-env
 ```
-Generates `dist\OnmyojiHelper\` containing **`OnmyojiHelper.exe`** and **`data\`** (all 33 compiled `.pyd` C-extensions + local model assets, verified for zero `.py` source residue).
+Generates `dist\OnmyojiHelper\` containing **`OnmyojiHelper.exe`** and **`data\`** (all 33 compiled `.pyd` C-extensions + local model assets, audited for zero `.py` source residue and zero accidental `.env` bundling in default builds).
 
 ---
 
@@ -202,11 +211,11 @@ onmyoji-tactical-helper/
 ├── pyproject.toml                     # PEP 621 metadata (v1.0.0) + Ruff, Mypy & Coverage config
 ├── docs/
 │   ├── ARCHITECTURE.md                # System Architecture Guide (math models, CV & concurrency)
-│   ├── BENCHMARKS.json                # Reproducible P50 / P95 / P99 offline latency measurements
+│   ├── BENCHMARKS.json                # Reproducible P50 / P95 / P99 micro + E2E latency metrics
 │   ├── model_artifacts/               # Verifiable YOLOv8n args.yaml, results.csv, PR/F1 & matrices
 │   └── image/                         # Live 125% DPI Yellow & Red Mode HUD screenshots
 ├── scripts/
-│   └── run_benchmarks.py              # Reproducible latency benchmark harness
+│   └── run_benchmarks.py              # Reproducible micro + single-frame E2E benchmark harness
 ├── run_app.py                         # Pre-import DPI & conditional UAC bootstrapper
 ├── build_release.py                   # Low-RAM Cython 3.3 .pyd compiler & PyInstaller packager
 ├── src/
@@ -219,7 +228,7 @@ onmyoji-tactical-helper/
 │       ├── ui/                        # MainWindow, AITacticalUI, BattleOverlayUI & DemoSandbox
 │       └── app/                       # Runtime bootstrap, ModeController & BattleCoordinator
 ├── tests/                             # Offline unit, E2E & noisy synthetic CV suite (29 tests)
-└── .github/workflows/ci.yml           # GitHub Actions CI (Ruff + Mypy + Pytest >=70% Coverage)
+└── .github/workflows/ci.yml           # GitHub Actions CI (Ruff + Mypy + Pytest >=70% Core Coverage)
 ```
 
 ---

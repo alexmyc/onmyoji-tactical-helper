@@ -86,6 +86,24 @@ class ShikigamiRepository:
         """Returns the underlying raw tags dictionary."""
         return self._tags_db
 
+    @property
+    def known_ocr_tokens(self) -> frozenset[str]:
+        """Returns all known shikigami full names, short aliases, and tag keys for OCR verification."""
+        tokens: set[str] = set()
+        for full_k, short_v in self.full_to_short_map.items():
+            if full_k:
+                tokens.add(full_k.strip())
+            if short_v:
+                tokens.add(short_v.strip())
+        for multi_tok in self.sorted_multi_shorts:
+            if multi_tok:
+                tokens.add(multi_tok.strip())
+        for tag_key in self._tags_db:
+            if tag_key:
+                tokens.add(tag_key.strip())
+        tokens.discard("")
+        return frozenset(tokens)
+
     def update_tags(self, tags_db: dict[str, dict[str, Any]]) -> None:
         """Updates the tag database and invalidates the internal LRU lookup cache."""
         self._tags_db = dict(tags_db or {})

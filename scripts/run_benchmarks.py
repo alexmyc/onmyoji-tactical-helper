@@ -1,8 +1,10 @@
 """Reproducible Offline Latency Benchmark Suite for Onmyoji Tactical Helper.
 
-Measures P50 / P95 / P99 / Mean execution latency (in milliseconds) across core CPU
-decision, spatial tracking, geometric CV, and mixed-DPI coordinate-mapping stages,
-writing structured results to `docs/BENCHMARKS.json`.
+Measures P50 / P95 / P99 / Mean execution latency (in milliseconds) across individual
+decision/vision/DPI stages as well as the full single-frame end-to-end pipeline
+(`1280x720 Synthetic Frame -> TurnDetector + SpatialTracker -> BattleContextBuilder
+ -> TacticalEngine -> BattlePresenter -> 125% DPI CoordinateMapper`), writing structured
+output to `docs/BENCHMARKS.json`.
 
 Usage:
     python scripts/run_benchmarks.py
@@ -34,13 +36,47 @@ from onmyoji_helper.automation.coordinate_mapper import (  # noqa: E402
     CoordinateMapper,
     project_cropped_to_physical_client,
 )
+from onmyoji_helper.decision.battle_context import BattleContextBuilder  # noqa: E402
 from onmyoji_helper.decision.draft_engine import build_database, get_recommendation  # noqa: E402
+from onmyoji_helper.decision.llm_engine import TacticalEngine  # noqa: E402
 from onmyoji_helper.domain.models import CropOffset  # noqa: E402
 from onmyoji_helper.domain.public_demo_data import get_public_demo_bundle  # noqa: E402
 from onmyoji_helper.domain.shikigami_repository import ShikigamiRepository  # noqa: E402
+from onmyoji_helper.ui.battle_presenter import BattlePresenter  # noqa: E402
 from onmyoji_helper.vision.draft_ocr_scanner import get_downsampled_blur  # noqa: E402
 from onmyoji_helper.vision.spatial_tracker import StateParser  # noqa: E402
 from onmyoji_helper.vision.turn_detector import TurnDetector  # noqa: E402
+
+
+class _BenchStubRoot:
+    def after(self, _ms: int, fn: Callable[..., Any], *args: Any) -> str:
+        fn(*args)
+        return "ok"
+
+
+class _BenchStubAdviceUI:
+    def winfo_exists(self) -> bool:
+        return True
+
+    def update_advice(self, _text: str) -> None:
+        return None
+
+
+class _BenchStubOverlayUI:
+    def winfo_exists(self) -> bool:
+        return True
+
+    def sync_position(self, _hwnd: int) -> None:
+        return None
+
+    def clear(self) -> None:
+        return None
+
+    def update_targets(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    def update_skills(self, *args: Any, **kwargs: Any) -> None:
+        return None
 
 
 def _percentile(sorted_vals: list[float], q: float) -> float:
@@ -136,7 +172,6 @@ def main() -> None:
 
     def bench_noisy_affine_tracker() -> None:
         step_clock[0] += 0.25
-        # Keep within 3.5s grace by refreshing full visibility every 8 frames
         occlude = (int(step_clock[0] * 4) % 8) != 0
         boxes: list[dict[str, float | int]] = []
         for idx, r in enumerate((0.48, 0.57, 0.66, 0.75, 0.84)):
@@ -188,6 +223,73 @@ def main() -> None:
         detector.locked_skill_mode = None
         detector.detect_available_skills(turn_frame, frame_seq=1)
 
+    # 7. End-to-End Single-Frame Pipeline (1280x720 Frame -> TurnDetector + SpatialTracker
+    #    -> BattleContextBuilder -> TacticalEngine -> BattlePresenter -> 125% DPI CoordinateMapper)
+    e2e_detector = TurnDetector()
+    e2e_tracker = StateParser()
+    e2e_ctx = BattleContextBuilder(repo=repo)
+    e2e_engine = TacticalEngine(force_rule_only=True)
+    e2e_presenter = BattlePresenter()
+    e2e_presenter.ai_ui = _BenchStubAdviceUI()  # type: ignore[assignment]
+    e2e_presenter.overlay_ui = _BenchStubOverlayUI()  # type: ignore[assignment]
+    e2e_root = _BenchStubRoot()
+    e2e_crop = CropOffset(x0=0, y0=0, client_w=1600, client_h=900)  # 125% DPI physical client for 1280x720
+    e2e_mapper = CoordinateMapper(
+        custom_mapper=lambda _h, ix, iy, iw, ih: (
+            100 + int(round(ix * (1600.0 / iw))),
+            80 + int(round(iy * (900.0 / ih))),
+            (100, 80, 1700, 980),
+        )
+    )
+    e2e_boxes_base: list[dict[str, float | int]] = [
+        {"cls": 0, "cx": 1280 * r, "cy": 720 * 0.30} for r in (0.48, 0.57, 0.66, 0.75, 0.84)
+    ] + [
+        {"cls": 1, "cx": 1280 * r, "cy": 720 * 0.62} for r in (0.130, 0.315, 0.495, 0.665, 0.835)
+    ]
+    e2e_tracker.parse_frame(my_draft, opp_draft, e2e_boxes_base, 1280, 720, now=100.0)
+    e2e_clock = [100.25]
+
+    def bench_e2e_frame_to_hud() -> None:
+        e2e_clock[0] += 0.25
+        e2e_detector.reset_cache()
+        e2e_detector.is_turn_confirmed = True
+        e2e_detector.locked_skill_mode = None
+        skills = e2e_detector.detect_available_skills(turn_frame, frame_seq=1)
+        mapping = e2e_detector.get_skill_mapping(turn_frame)
+
+        my_s, opp_s = e2e_tracker.parse_frame(
+            my_draft, opp_draft, e2e_boxes_base, 1280, 720, now=e2e_clock[0]
+        )
+        payload = e2e_ctx.build_payload(
+            my_status=my_s,
+            opp_status=opp_s,
+            is_my_turn=True,
+            skill_states=skills,
+            active_slot="Slot 4",
+            active_shiki_name="閻",
+        )
+        decision = e2e_engine.get_tactical_advice(payload, mode="RULE")
+        e2e_presenter.schedule_overlay_frame(
+            root_window=e2e_root,  # type: ignore[arg-type]
+            hwnd=1001,
+            my_status=my_s,
+            opp_status=opp_s,
+            total_alive=10,
+            img_w=1280,
+            img_h=720,
+            is_my_turn=True,
+            target_slot=payload["recommended_target_slot"],
+            target_is_enemy=payload["target_is_enemy"],
+            turn_detector=e2e_detector,
+            skill_states=skills,
+            skill_mapping=mapping,
+            crop=e2e_crop,
+            is_cancelled_fn=lambda: False,
+        )
+        e2e_presenter.schedule_advice_text(e2e_root, decision["advice"], lambda: False)  # type: ignore[arg-type]
+        tx, ty = opp_s["Slot 1"]["pos"]
+        e2e_mapper.map_image_to_screen(1001, tx, ty, 1280, 720, crop=e2e_crop)
+
     results = {
         "metadata": {
             "python_version": platform.python_version(),
@@ -204,6 +306,7 @@ def main() -> None:
             "mixed_dpi_coordinate_projection": _measure(bench_dpi_projection, iterations=5000),
             "draft_roi_motion_diff_gate": _measure(bench_motion_diff_gate, iterations=2000),
             "turn_detector_sobel_hsv_full_pass": _measure(bench_turn_detector_full, iterations=500),
+            "e2e_synthetic_frame_to_hud": _measure(bench_e2e_frame_to_hud, iterations=500),
         },
     }
 

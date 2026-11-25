@@ -75,14 +75,8 @@ def _draft_ocr_worker(
     logger: Any,
 ) -> None:
     """Background worker orchestrating GDI capture, `DraftOcrScanner`, and `DraftStateMachine`."""
-    short_tokens = {
-        tok
-        for full_k, short_v in repository.full_to_short_map.items()
-        for tok in (full_k, short_v)
-        if tok and len(tok) <= 3
-    }
     clicker = CaptureEngine()
-    scanner = DraftOcrScanner(known_tokens=short_tokens)
+    scanner = DraftOcrScanner(known_tokens=repository.known_ocr_tokens)
     fsm = DraftStateMachine()
 
     def push_ui(

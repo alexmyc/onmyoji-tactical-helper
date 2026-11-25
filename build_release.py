@@ -369,8 +369,13 @@ def _run_pyinstaller(
     print(f"✅ PyInstaller 封裝完成 -> {os.path.join(dist_dir, APP_NAME)} (內部資源收攏至 {CONTENTS_DIR_NAME}/)")
 
 
-def _copy_model_assets(project_root: str, output_app_dir: str, include_full_llm: bool) -> None:
-    print(f"\n📂 [Step 4/6] 正在直接複製模型權重檔至 {CONTENTS_DIR_NAME}/ (不經壓縮封裝，避免爆 RAM)...")
+def _copy_model_assets(
+    project_root: str,
+    output_app_dir: str,
+    include_full_llm: bool,
+    include_local_env: bool = False,
+) -> None:
+    print(f"\n📂 [Step 4/6] 正在直接複製模型權重與範本資源至 {CONTENTS_DIR_NAME}/ (不經壓縮封裝，避免爆 RAM)...")
 
     data_dir = os.path.join(output_app_dir, CONTENTS_DIR_NAME)
     os.makedirs(data_dir, exist_ok=True)
@@ -381,10 +386,19 @@ def _copy_model_assets(project_root: str, output_app_dir: str, include_full_llm:
         size_mb = os.path.getsize(yolo_src) / (1024 * 1024)
         print(f"   ✅ 已複製 {YOLO_WEIGHT_FILE} -> {CONTENTS_DIR_NAME}/{YOLO_WEIGHT_FILE} ({size_mb:.1f} MB)")
 
-    dotenv_src = os.path.join(project_root, ".env")
-    if os.path.isfile(dotenv_src):
-        shutil.copy2(dotenv_src, os.path.join(data_dir, ".env"))
-        print(f"   ✅ 已自動封裝本機私有設定 .env -> {CONTENTS_DIR_NAME}/.env (直連真實雲端資料庫)")
+    env_example_src = os.path.join(project_root, ".env.example")
+    if os.path.isfile(env_example_src):
+        shutil.copy2(env_example_src, os.path.join(data_dir, ".env.example"))
+
+    if include_local_env:
+        dotenv_src = os.path.join(project_root, ".env")
+        if os.path.isfile(dotenv_src):
+            shutil.copy2(dotenv_src, os.path.join(data_dir, ".env"))
+            print(f"   ✅ [--include-local-env] 已封裝本機私有 .env -> {CONTENTS_DIR_NAME}/.env")
+        else:
+            print("   ⚠️ 指定了 --include-local-env，但專案根目錄未找到 .env。")
+    else:
+        print(f"   🔒 預設安全模式：未複製私人 .env（僅附帶 {CONTENTS_DIR_NAME}/.env.example 無憑證範本）。")
 
     if include_full_llm:
         gguf_src = os.path.join(project_root, GGUF_MODEL_FILE)
@@ -420,6 +434,7 @@ def _verify_zero_source_leak(
     output_app_dir: str,
     expected_modules: list[tuple[str, str, str]],
     include_full_llm: bool,
+    include_local_env: bool = False,
 ) -> None:
     print("\n🔐 [Step 6/6] 正在執行極簡目錄結構、UAC 清單、零源碼洩漏與產物完整性驗證...")
 
@@ -480,10 +495,13 @@ def _verify_zero_source_leak(
         if not os.path.isfile(data_yolo):
             raise AssertionError(f"找不到模型權重檔: {data_yolo}")
 
-    if os.path.isfile(os.path.join(project_root, ".env")):
-        data_dotenv = os.path.join(data_dir, ".env")
+    data_dotenv = os.path.join(data_dir, ".env")
+    if include_local_env and os.path.isfile(os.path.join(project_root, ".env")):
         if not os.path.isfile(data_dotenv):
             raise AssertionError(f"找不到封裝的私有設定檔: {data_dotenv}")
+    elif not include_local_env:
+        if os.path.exists(data_dotenv) or os.path.exists(os.path.join(output_app_dir, ".env")):
+            raise AssertionError("預設無憑證模式下偵測到私人 .env 被意外複製進發佈目錄！")
 
     if include_full_llm and os.path.isfile(os.path.join(project_root, GGUF_MODEL_FILE)):
         data_gguf = os.path.join(data_dir, GGUF_MODEL_FILE)
@@ -523,6 +541,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Cython 編譯最大並發數（預設 1 逐一編譯最省 RAM，上限 2）",
+    )
+    parser.add_argument(
+        "--include-local-env",
+        action="store_true",
+        help="顯式將本機私有 .env 封裝至 data/.env（預設 False：僅複製 .env.example，確保預設產物無憑證殘留）",
     )
     parser.add_argument(
         "--dry-run",
@@ -575,9 +598,18 @@ def main() -> None:
             packages=packages,
             include_full_llm=args.full,
         )
-        _copy_model_assets(project_root, output_app_dir, include_full_llm=args.full)
+        _copy_model_assets(
+            project_root,
+            output_app_dir,
+            include_full_llm=args.full,
+            include_local_env=args.include_local_env,
+        )
         _verify_zero_source_leak(
-            project_root, output_app_dir, expected_modules=modules, include_full_llm=args.full
+            project_root,
+            output_app_dir,
+            expected_modules=modules,
+            include_full_llm=args.full,
+            include_local_env=args.include_local_env,
         )
     finally:
         if not args.dry_run:

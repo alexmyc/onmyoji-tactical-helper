@@ -29,8 +29,8 @@ flowchart LR
 1. **Zero Import-Time Side Effects**: Process DPI awareness, OpenMP/BLAS thread-pool caps, rotating log handlers, and neural runtimes (`RapidOCR`, `YOLOv8n`, `Gemma-4`) are never initialized at module import time; all runtime wiring is deferred to `bootstrap.run_application()` or lazy per-engine initialization.
 2. **Dual-Track Configuration Isolation (`infra/env_loader.py`)**:
    - **Private Cloud Track**: When an untracked `.env` file (`<project_root>/.env` or `<exe_dir>/data/.env`) defines `ONMYOJI_SHEET_*` and `ONMYOJI_AUTH_CSV_URL`, `SheetsSyncStore` synchronizes the full **1,128-entry alias dictionary and 251 shikigami combat tag profiles** from external Google Sheets into a local AppData cache obfuscated via vectorized NumPy XOR (`np.bitwise_xor`, ~50x faster than Python byte loops), while `AuthService` validates the hardware SHA-256 Machine ID (`wmic csproduct get uuid` with `Cryptography\MachineGuid` fallback for Windows 11 24H2+).
-   - **Public Sandbox Track**: When `.env` is absent (default after `git clone`) or `--demo` is passed, the application skips UAC elevation and network sync, loading the self-contained sandbox dataset (`domain/public_demo_data.py`: **~25 sample aliases, 13 unit combat profiles, and 2 playbooks**) into `ShikigamiRepository` and `DemoSandboxWindow`.
-3. **Bounded Alias & Tag Resolution (`domain/shikigami_repository.py`)**: Resolves exact dictionary keys first, exact `full_to_short_map` aliases second, and length-descending root containment (`len >= 2`, overlap ratio $\ge 0.33$, excluding generic rarity prefixes such as `SP`/`SSR`) third—wrapped in `@lru_cache(maxsize=512)` (`P50 < 0.001 ms`) to prevent short-token false positives.
+   - **Public Sandbox Track**: When `.env` is absent (default after `git clone`) or `--demo` is passed, the application skips UAC elevation and network sync, loading the self-contained sandbox dataset (`domain/public_demo_data.py`: **27 sample aliases, 13 unit combat profiles, and 2 playbooks**) into `ShikigamiRepository` and `DemoSandboxWindow`.
+3. **Bounded Alias & Tag Resolution (`domain/shikigami_repository.py`)**: Resolves exact dictionary keys first, exact `full_to_short_map` aliases second, and length-descending root containment (`len >= 2`, overlap ratio $\ge 0.33$, excluding generic rarity prefixes such as `SP`/`SSR`) third—wrapped in `@lru_cache(maxsize=512)` (`P50 < 0.001 ms`), while exposing `known_ocr_tokens` dynamically to `DraftOcrScanner` without duplicating domain lists inside `vision/`.
 
 ---
 
@@ -78,13 +78,11 @@ Simultaneously, a parallel **Mirror / Copycat Detector** evaluates $P_{\text{opp
 ### 3.1 `YOLOv8n` Dataset Split, Hyperparameters & Validation Evidence
 All training records and evaluation curves are archived in [`docs/model_artifacts/`](model_artifacts/) ([args.yaml](model_artifacts/args.yaml), [results.csv](model_artifacts/results.csv), [labels.jpg](model_artifacts/labels.jpg), [BoxPR_curve.png](model_artifacts/BoxPR_curve.png), [BoxF1_curve.png](model_artifacts/BoxF1_curve.png)). Binary `.pt` weights and raw game frame datasets remain excluded from Git via `.gitignore`.
 
-- **Dataset & Train/Val Partition**: Because *Onmyoji* 5v5 PvP takes place on a fixed-perspective isometric battle stage, transfer learning from `yolov8n.pt` (`5.9 MB`, `imgsz=640`, `batch=4`, `150 epochs`, `110.1s` CUDA wall time) was trained on **16 annotated 5v5 combat scenes (`121` unit bounding boxes: `62 enemy`, `59 ally`)** and evaluated against a held-out **validation split (`20` unit bounding boxes: `10 enemy`, `10 ally`)**.
+- **Dataset & Validation Split Disclosure**: Because *Onmyoji* 5v5 PvP takes place on a fixed-perspective isometric battle stage, transfer learning from `yolov8n.pt` (`5.9 MB`, `imgsz=640`, `batch=4`, `150 epochs`, `110.1s` CUDA wall time) was trained on **16 annotated 5v5 combat scenes (`121` unit bounding boxes: `62 enemy`, `59 ally`)** and evaluated on a **validation split (`20` unit bounding boxes: `10 enemy`, `10 ally`)**. Note that this validation split was also used to select the best checkpoint (`best.pt`), rather than serving as an independent held-out test set.
 - **Augmentation Pipeline**: `auto_augment=randaugment`, `mosaic=1.0` (`close_mosaic=10`), `erasing=0.4`, HSV color perturbation (`hsv_h=0.015`, `hsv_s=0.70`, `hsv_v=0.40` for intense ultimate lighting), geometric translation/scaling (`translate=0.10`, `scale=0.20`), and horizontal flip (`fliplr=0.50`).
-- **Best Checkpoint Metrics (Epoch 98 in [results.csv](model_artifacts/results.csv))**:
-  - **`mAP@50`**: `99.5%` (`0.9950` — `enemy: 0.995`, `ally: 0.995`)
-  - **`Precision`**: `89.0%` (`0.88982`)
-  - **`Recall`**: `93.5%` (`0.93525`)
-  - **`mAP@50-95`**: `60.1%` (`0.60071`)
+- **Peak vs. Final Checkpoint Metrics ([results.csv](model_artifacts/results.csv))**:
+  - **Peak Checkpoint — Epoch 98 (`best.pt`)**: `mAP@50 = 99.5%` (`0.9950`) · `Precision = 89.0%` (`0.88982`) · `Recall = 93.5%` (`0.93525`) · `mAP@50-95 = 60.1%` (`0.60071`)
+  - **Final Checkpoint — Epoch 150 (`last.pt`)**: `mAP@50 = 94.4%` (`0.9436`) · `Precision = 95.9%` (`0.95944`) · `Recall = 87.4%` (`0.87447`) · `mAP@50-95 = 52.2%` (`0.52177`)
 
 ![YOLOv8n Validation Confusion Matrix](model_artifacts/confusion_matrix.png)
 
@@ -100,9 +98,12 @@ $$
 
 3. **Symmetric EMA Trajectories & `3.5s` Grace Recovery**: Both ally and enemy camps maintain exponential moving average positions (`smooth_pos_my`, `smooth_pos_opp`), suppressing frame-to-frame detection jitter by `> 35%`. If a unit vanishes due to ultimate VFX ($\Delta t < 3.5\text{ s}$), its alive state and coordinates recover via $\hat{p}_k^{(t)} \to \text{EMA}_k \to p_k^{(0)}$, maintaining `100%` slot continuity (`< 10 px` mean error under `±4 px` noise + random dropouts in `tests/test_vision_synthetic_regression.py`) before transitioning genuinely defeated units ($\Delta t \ge 3.5\text{ s}$) to `alive = False`.
 
-### 3.3 Circumferential Sobel Turn Verifier & Whitelist-Tiered `RapidOCR`
+### 3.3 Circumferential Sobel Turn Verifier & Cross-Frame Temporal `RapidOCR` Gate
 - **`TurnDetector`**: Combines `CLAHE` (`clipLimit=2.5`), `HoughCircles`, and a **16-point circumferential Sobel gradient check** (`>= 7/16` perimeter samples with $\|\nabla I\| \ge 32.0$ plus pairwise radius/vertical colinearity `r_diff <= 12%`, `y_diff <= 8%`), rejecting full-screen flashbang washouts while distinguishing 3- vs. 4-skill layouts and HSV availability (`V_mean >= 75`, `V_90 >= 110`, `S_mean >= 30 | S_85 >= 45`).
-- **`DraftOcrScanner`**: Resizes the opponent ROI (`1.30x` linear upscale, or normalized to `640 px` width on narrow windows), horizontally stitches the aligned ally column (`np.hstack`) for a single `RapidOCR` pass, and applies **two-tier whitelist confidence filtering**: general text boxes require `min_confidence = 0.65`, whereas recognized glyphs matching the known single-character / short-token shikigami whitelist (`季`, `瀧`, `離`, `神`, `連`, `石`, etc.) accept `known_token_min_confidence = 0.35` so isolated single CJK characters are never dropped.
+- **`DraftOcrScanner`**: Resizes the opponent ROI (`1.30x` linear upscale, or normalized to `640 px` width on narrow windows), horizontally stitches the aligned ally column (`np.hstack`) for a single `RapidOCR` pass, and enforces a **two-tier + multi-frame temporal consistency gate** over `known_tokens` injected from `ShikigamiRepository`:
+  - `score >= 0.65`: immediate single-frame acceptance;
+  - `0.35 <= score < 0.65` and matching `known_tokens`: held until observed across **`min_consecutive_frames = 2` consecutive scans** of the same column (bypassing static motion-diff skipping while a streak is pending), filtering out transient 1-frame background flickers (`火`, `白`) while reliably confirming genuine single-character picks (`季`, `瀧`);
+  - `score < 0.35` or non-matching `< 0.65`: discarded immediately.
 
 ---
 
@@ -145,7 +146,7 @@ Screen coordinates are translated via `ClientToScreen` and clamped within the in
 | Thread Name | Cadence / Trigger | Synchronization Boundary & Responsibility |
 | :--- | :--- | :--- |
 | **`MainThread` (Tkinter)** | `50 ms` UI queue drain + `.after(0)` | Sole owner of Tkinter widgets and Canvas primitives; floating panels apply 64-bit safe `WS_EX_NOACTIVATE` post-`deiconify()`. |
-| **`ocr_worker`** | `0.9s / 1.3s / 2.5s / 4.5s` | Executes GDI draft capture, motion-diff gating, `RapidOCR` (`0.65 / 0.35` whitelist gate), and `DraftStateMachine`; publishes tuples via `queue.Queue`. |
+| **`ocr_worker`** | `0.9s / 1.3s / 2.5s / 4.5s` | Executes GDI draft capture, motion-diff gating, `RapidOCR` (2-frame temporal gate), and `DraftStateMachine`; publishes tuples via `queue.Queue`. |
 | **`BattleCoordinatorLoop`** | `0.25s` (ally) / `0.60s` (enemy) | Acquires `yolo_lock` for `YOLOv8n` + affine tracking; guards shared slot dictionaries via re-entrant `_state_lock (RLock)`. |
 | **`AsyncGemmaWorker`** | On turn edge (`>= 3.0s` cooldown) | Acquires independent `llm_lock` for Gemma-4 GGUF completion so LLM prefill never blocks `0.25s` HUD tracking. |
 | **`RedModeKillSwitch`** | `50 ms` `GetAsyncKeyState` poll | Monitors `F12` / `ESC` override hotkeys; increments `ModeController._transition_epoch` and atomically disarms `auto_battle_enabled`. |
@@ -155,5 +156,5 @@ Screen coordinates are translated via `ClientToScreen` and clamped within the in
 ## 6. Native Binary Compilation — Source Obfuscation & Packaging (`build_release.py`)
 
 1. **Sequential Low-RAM Cython 3.3 Compilation**: Discovers all **33 modules** under `src/onmyoji_helper/` and compiles each inside an isolated child process (`--workers 1` default) into native Windows `.pyd` C-extensions with `docstrings=False`, `binding=False`, `c_line_in_traceback=False`, `emit_code_comments=False`, MSVC `/O2 /DNDEBUG`, and `/DEBUG:NONE` symbol stripping for source obfuscation and distribution hygiene.
-2. **PyInstaller Standalone Packaging**: Packages `OnmyojiHelper.exe` with `--onedir --windowed --uac-admin --contents-directory=data`, embedding the Windows `requireAdministrator` PE `RT_MANIFEST` and copying `best.pt` (plus local `.env` into `data/.env` when present) directly without archive re-compression.
-3. **Automated Post-Build Hygiene Audit**: Verifies root directory cleanliness (`['OnmyojiHelper.exe', 'data']`), `requireAdministrator` manifest presence, `33/33` `.pyd` module completeness, and **zero `.py` source files** in the release directory.
+2. **Credential-Free Default Packaging**: Packages `OnmyojiHelper.exe` with `--onedir --windowed --uac-admin --contents-directory=data`, embedding the Windows `requireAdministrator` PE `RT_MANIFEST` and copying `.env.example` (never `.env` unless `--include-local-env` is explicitly passed) alongside local model weights.
+3. **Automated Post-Build Hygiene Audit**: Verifies root directory cleanliness (`['OnmyojiHelper.exe', 'data']`), `requireAdministrator` manifest presence, `33/33` `.pyd` module completeness, **zero `.py` source files**, and **zero accidental `.env` bundling** in default builds.

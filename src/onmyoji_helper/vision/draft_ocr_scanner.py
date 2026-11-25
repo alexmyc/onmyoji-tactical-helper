@@ -2,9 +2,8 @@
 
 Encapsulates RapidOCR lazy initialization (DirectML/CPU memory-isolated, `use_cls=True`,
 2 intra-op threads), Ban-phase widened top-center ROI (`x >= 0.38`), dual-column horizontal
-stitching, localized motion-diff throttling, and two-tier whitelist confidence filtering
-(preserving genuine single-character shikigami such as `季`, `瀧`, `離`, `神` while dropping
-low-confidence background OCR noise).
+stitching, localized motion-diff throttling, and two-tier + multi-frame temporal consistency
+filtering using domain tokens injected from `ShikigamiRepository`.
 """
 
 import logging
@@ -22,109 +21,26 @@ OCR_FALLBACK_INTERVAL: float = 3.0
 IN_BATTLE_DIFF_INTERVAL: float = 4.5
 DEFAULT_MIN_OCR_CONFIDENCE: float = 0.65
 DEFAULT_KNOWN_TOKEN_MIN_CONFIDENCE: float = 0.35
+DEFAULT_MIN_CONSECUTIVE_FRAMES: int = 2
 
-# Canonical single-character & short-name Onmyoji shikigami and draft-phase keywords whose
-# isolated CJK glyphs frequently score 0.35..0.65 in RapidOCR.
-KNOWN_SHORT_SHIKIGAMI_WHITELIST: frozenset[str] = frozenset(
-    {
-        "季",
-        "瀧",
-        "荒",
-        "離",
-        "神",
-        "連",
-        "石",
-        "封",
-        "禪",
-        "須",
-        "千",
-        "帝",
-        "葛",
-        "骷",
-        "閻",
-        "火",
-        "言",
-        "玲",
-        "吞",
-        "鏡",
-        "薰",
-        "鴆",
-        "覺",
-        "鯉",
-        "白",
-        "切",
-        "花",
-        "燈",
-        "蓮",
-        "嵐",
-        "岳",
-        "蛇",
-        "鹿",
-        "緣",
-        "熊",
-        "草",
-        "葉",
-        "桃",
-        "追月",
-        "百羽",
-        "酒吞",
-        "神荒",
-        "不知火",
-        "天照",
-        "葛葉",
-        "千姬",
-        "言靈",
-        "閻魔",
-        "禁",
-        "禁選",
-        "禁选",
-        "禁用",
-    }
-)
+# UI-structural Ban-header keywords only (domain shikigami tokens are injected via `known_tokens`)
+_DRAFT_HEADER_KEYWORDS: frozenset[str] = frozenset({"禁", "禁選", "禁选", "禁用"})
 
 
-def _is_whitelisted_draft_token(text: str, whitelist: frozenset[str]) -> bool:
-    """Returns True if recognized text matches a known single-char or short shikigami/draft token."""
+def _normalize_matched_known_token(text: str, known_whitelist: frozenset[str]) -> str | None:
+    """Returns a canonical token key if `text` matches injected `known_tokens` or Ban headers."""
     cleaned = text.strip()
     if not cleaned:
-        return False
-    if cleaned in whitelist:
-        return True
-    # Support short Ban badges attached directly to a single-char shikigami (e.g. "禁用季", "禁選瀧")
-    if len(cleaned) <= 4 and any(
-        kw in cleaned for kw in ("禁用", "禁選", "禁选")
-    ):
+        return None
+    if cleaned in known_whitelist or cleaned in _DRAFT_HEADER_KEYWORDS:
+        return cleaned
+    if len(cleaned) <= 6 and any(kw in cleaned for kw in ("禁用", "禁選", "禁选")):
         remainder = (
             cleaned.replace("禁用", "").replace("禁選", "").replace("禁选", "").strip()
         )
-        if not remainder or remainder in whitelist:
-            return True
-    return False
-
-
-def _passes_confidence(
-    res: Any,
-    min_confidence: float,
-    known_token_min_confidence: float,
-    whitelist: frozenset[str],
-) -> bool:
-    """Evaluates two-tier OCR confidence: `min_confidence` (0.65) general, `0.35` for known tokens."""
-    if min_confidence <= 0.0:
-        return True
-    if not isinstance(res, (list, tuple)) or len(res) < 3 or res[2] is None:
-        return True
-    try:
-        score = float(res[2])
-    except (TypeError, ValueError):
-        return True
-
-    if score >= min_confidence:
-        return True
-    if score < known_token_min_confidence:
-        return False
-
-    raw_text = str(res[1]) if len(res) >= 2 and res[1] is not None else ""
-    return _is_whitelisted_draft_token(raw_text, whitelist)
+        if not remainder or remainder in known_whitelist:
+            return cleaned
+    return None
 
 
 def get_downsampled_blur(img_gray: np.ndarray | None) -> np.ndarray | None:
@@ -136,25 +52,30 @@ def get_downsampled_blur(img_gray: np.ndarray | None) -> np.ndarray | None:
 
 
 class DraftOcrScanner:
-    """Performs motion-throttled dual-column RapidOCR scanning for Ban/Pick & settlement screens."""
+    """Performs motion-throttled dual-column RapidOCR scanning with temporal token verification."""
 
     def __init__(
         self,
         ocr_callable: Callable[[np.ndarray], tuple[Any, Any]] | None = None,
         min_confidence: float = DEFAULT_MIN_OCR_CONFIDENCE,
         known_token_min_confidence: float = DEFAULT_KNOWN_TOKEN_MIN_CONFIDENCE,
+        min_consecutive_frames: int = DEFAULT_MIN_CONSECUTIVE_FRAMES,
         known_tokens: Iterable[str] | None = None,
     ) -> None:
-        """Initializes motion-diff buffers, two-tier confidence gates, and optional OCR backend."""
+        """Initializes motion-diff buffers, injected domain whitelist, and temporal streak state."""
         self._ocr_engine: Callable[[np.ndarray], tuple[Any, Any]] | None = ocr_callable
         self.min_confidence: float = float(min_confidence)
         self.known_token_min_confidence: float = float(known_token_min_confidence)
-        extra_tokens = {t.strip() for t in (known_tokens or ()) if t and t.strip()}
-        self.known_whitelist: frozenset[str] = KNOWN_SHORT_SHIKIGAMI_WHITELIST | extra_tokens
+        self.min_consecutive_frames: int = max(1, int(min_consecutive_frames))
+        self.known_whitelist: frozenset[str] = frozenset(
+            t.strip() for t in (known_tokens or ()) if t and t.strip()
+        )
+
         self.prev_opp_small_blur: np.ndarray | None = None
         self.prev_my_small_blur: np.ndarray | None = None
         self.last_ocr_time: float = 0.0
         self.last_window_size: tuple[int, int] = (0, 0)
+        self._token_streaks: dict[str, dict[str, int]] = {}
 
     def _ensure_ocr_engine(self) -> Callable[[np.ndarray], tuple[Any, Any]]:
         """Lazily initializes RapidOCR on first scan so importing this module has zero overhead."""
@@ -173,9 +94,79 @@ class DraftOcrScanner:
         return self._ocr_engine
 
     def reset_motion_cache(self) -> None:
-        """Resets previous ROI blur buffers on manual match reset or window resize."""
+        """Resets ROI blur buffers and multi-frame OCR streak counters on match reset or resize."""
         self.prev_opp_small_blur = None
         self.prev_my_small_blur = None
+        self._token_streaks.clear()
+
+    def _has_pending_verifications(self) -> bool:
+        """Returns True if any medium-confidence known token is awaiting next-frame confirmation."""
+        target = self.min_consecutive_frames
+        if target <= 1:
+            return False
+        return any(
+            0 < streak < target
+            for col_streaks in self._token_streaks.values()
+            for streak in col_streaks.values()
+        )
+
+    def _filter_column_temporal(
+        self,
+        column_key: str,
+        raw_items: list[Any],
+        min_conf: float,
+        known_conf: float,
+    ) -> tuple[list[Any], int]:
+        """Applies two-tier + cross-frame consecutive verification to a single ROI column.
+
+        - `score >= min_conf` (0.65): immediate single-frame pass.
+        - `known_conf <= score < min_conf` (0.35..0.65) AND in `known_whitelist`: requires
+          appearing in `min_consecutive_frames` (2) consecutive scans of `column_key`.
+        - Otherwise: dropped immediately.
+        """
+        if min_conf <= 0.0:
+            return list(raw_items), 0
+
+        prev_streaks = self._token_streaks.get(column_key, {})
+        next_streaks: dict[str, int] = {}
+        kept: list[Any] = []
+        dropped = 0
+        required_frames = self.min_consecutive_frames
+
+        for res in raw_items:
+            if not isinstance(res, (list, tuple)) or len(res) < 3 or res[2] is None:
+                kept.append(res)
+                continue
+            try:
+                score = float(res[2])
+            except (TypeError, ValueError):
+                kept.append(res)
+                continue
+
+            raw_text = str(res[1]) if len(res) >= 2 and res[1] is not None else ""
+            matched_tok = _normalize_matched_known_token(raw_text, self.known_whitelist)
+
+            if score >= min_conf:
+                if matched_tok is not None:
+                    next_streaks[matched_tok] = max(
+                        next_streaks.get(matched_tok, 0),
+                        prev_streaks.get(matched_tok, 0) + 1,
+                        required_frames,
+                    )
+                kept.append(res)
+            elif score >= known_conf and matched_tok is not None:
+                # Increment strictly once per frame relative to `prev_streaks`
+                new_streak = max(next_streaks.get(matched_tok, 0), prev_streaks.get(matched_tok, 0) + 1)
+                next_streaks[matched_tok] = new_streak
+                if new_streak >= required_frames:
+                    kept.append(res)
+                else:
+                    dropped += 1
+            else:
+                dropped += 1
+
+        self._token_streaks[column_key] = next_streaks
+        return kept, dropped
 
     def scan_draft_rois(
         self,
@@ -219,10 +210,11 @@ class DraftOcrScanner:
             roi_my_motion_gray = screen_gray[int(h * 0.10) : int(h * 0.48), int(w * 0.10) : int(w * 0.20)]
             curr_my_small_blur = get_downsampled_blur(roi_my_motion_gray)
 
-            # Never skip OCR before Ban is locked; apply ROI motion-diff throttling only during Draft 1~5
+            # Never skip OCR before Ban lock or while a medium-confidence token awaits 2nd-frame confirmation
             if (
                 is_active_state
                 and has_locked_opp_ban
+                and not self._has_pending_verifications()
                 and self.prev_opp_small_blur is not None
                 and curr_opp_small_blur is not None
                 and self.prev_my_small_blur is not None
@@ -266,17 +258,14 @@ class DraftOcrScanner:
                 else:
                     settle_img = roi_opp_color
                 ocr_settle, _ = ocr_fn(settle_img)
-                if ocr_settle:
-                    ocr_opp = [
-                        r
-                        for r in ocr_settle
-                        if _passes_confidence(r, conf_thresh, known_thresh, self.known_whitelist)
-                    ]
-                    dropped = len(ocr_settle) - len(ocr_opp)
-                    if dropped > 0:
-                        logger.debug(
-                            f"[DraftOcrScanner] Filtered {dropped} low-confidence settlement OCR boxes."
-                        )
+                raw_settle = list(ocr_settle) if ocr_settle else []
+                ocr_opp, dropped = self._filter_column_temporal(
+                    "settle", raw_settle, conf_thresh, known_thresh
+                )
+                if dropped > 0:
+                    logger.debug(
+                        f"[DraftOcrScanner] Filtered {dropped} unverified/low-confidence settlement OCR boxes."
+                    )
             return ocr_opp, ocr_my, True
 
         self.prev_my_small_blur = curr_my_small_blur
@@ -306,21 +295,23 @@ class DraftOcrScanner:
             x_border = target_w_my
 
             ocr_combined, _ = ocr_fn(combined_roi)
+            raw_my: list[Any] = []
+            raw_opp: list[Any] = []
             if ocr_combined:
-                dropped = 0
                 for res in ocr_combined:
-                    if not _passes_confidence(res, conf_thresh, known_thresh, self.known_whitelist):
-                        dropped += 1
-                        continue
                     box = res[0]
                     x_center = sum(pt[0] for pt in box) / 4.0
                     if x_center < x_border:
-                        ocr_my.append(res)
+                        raw_my.append(res)
                     else:
-                        ocr_opp.append(res)
-                if dropped > 0:
-                    logger.debug(
-                        f"[DraftOcrScanner] Filtered {dropped} low-confidence draft OCR boxes."
-                    )
+                        raw_opp.append(res)
+
+            ocr_my, dropped_my = self._filter_column_temporal("my", raw_my, conf_thresh, known_thresh)
+            ocr_opp, dropped_opp = self._filter_column_temporal("opp", raw_opp, conf_thresh, known_thresh)
+            total_dropped = dropped_my + dropped_opp
+            if total_dropped > 0:
+                logger.debug(
+                    f"[DraftOcrScanner] Held/filtered {total_dropped} draft OCR boxes pending confidence/temporal gate."
+                )
 
         return ocr_opp, ocr_my, True

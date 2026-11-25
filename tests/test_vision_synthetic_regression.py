@@ -280,23 +280,39 @@ def test_spatial_tracker_grace_expiry_marks_defeated_unit_cleanly() -> None:
 
 
 def test_draft_ocr_scanner_min_confidence_filters_noise_without_dropping_picks() -> None:
-    """Verifies two-tier OCR filtering: drops <0.65 noise while keeping 0.35..0.65 single-char shikigami."""
+    """Verifies 2-frame temporal consistency: filters 1-frame 0.52 noise, confirms 2-frame 0.55 '季'."""
+    _, dict_map, multi_shorts, tags_db = get_public_demo_bundle()
+    repo = ShikigamiRepository(tags_db=tags_db, full_to_short_map=dict_map, multi_char_shorts=multi_shorts)
+
+    call_idx = [0]
 
     def fake_rapidocr(stitched_img: np.ndarray) -> tuple[list[Any], None]:
+        call_idx[0] += 1
         _h, total_w = stitched_img.shape[:2]
         opp_x = float(total_w - 150)
+
+        if call_idx[0] == 1:
+            return (
+                [
+                    # High-confidence (>= 0.65) -> passes immediately on Frame 1
+                    ([[20.0, 40.0], [80.0, 40.0], [80.0, 70.0], [20.0, 70.0]], "不知火", 0.96),
+                    ([[opp_x, 20.0], [opp_x + 90, 20.0], [opp_x + 90, 50.0], [opp_x, 50.0]], "禁用封陽君", 0.94),
+                    # Single-frame transient background spark hallucination ('火' @ 0.52) -> held on Frame 1, disappears on Frame 2 -> FILTERED
+                    ([[25.0, 90.0], [55.0, 90.0], [55.0, 118.0], [25.0, 118.0]], "火", 0.52),
+                    # Genuine single-char shikigami '季' @ 0.55 -> Frame 1 streak=1 (held), Frame 2 streak=2 -> CONFIRMED
+                    ([[opp_x, 95.0], [opp_x + 40.0, 95.0], [opp_x + 40.0, 125.0], [opp_x, 125.0]], "季", 0.55),
+                    # Non-whitelisted garbled noise (< 0.65) -> immediately dropped
+                    ([[25.0, 140.0], [55.0, 140.0], [55.0, 165.0], [25.0, 165.0]], "※亂碼#", 0.42),
+                ],
+                None,
+            )
         return (
             [
-                # High-confidence multi-char Onmyoji UI text (>= 0.65)
-                ([[20.0, 40.0], [80.0, 40.0], [80.0, 70.0], [20.0, 70.0]], "不知火", 0.96),
-                ([[opp_x, 20.0], [opp_x + 90, 20.0], [opp_x + 90, 50.0], [opp_x, 50.0]], "禁用封陽君", 0.94),
-                # Genuine single-character shikigami "季" scoring 0.58 (common 0.40..0.65 single-glyph score) -> MUST KEEP
-                ([[opp_x, 95.0], [opp_x + 40.0, 95.0], [opp_x + 40.0, 125.0], [opp_x, 125.0]], "季", 0.58),
-                # Low-confidence random OCR noise / garbled artifacts (< 0.65 and not in whitelist) -> MUST DROP
-                ([[25.0, 120.0], [55.0, 120.0], [55.0, 145.0], [25.0, 145.0]], "※亂碼#", 0.42),
-                ([[opp_x, 150.0], [opp_x + 60, 150.0], [opp_x + 60, 180.0], [opp_x, 180.0]], "@_紋路", 0.52),
-                # Extremely low score (< 0.35) even on a known glyph -> MUST DROP
-                ([[25.0, 170.0], [55.0, 170.0], [55.0, 195.0], [25.0, 195.0]], "瀧", 0.21),
+                ([[20.0, 40.0], [80.0, 40.0], [80.0, 70.0], [20.0, 70.0]], "不知火", 0.95),
+                # '季' persists on 2nd consecutive frame at 0.55 -> reaches min_consecutive_frames=2 and passes!
+                ([[opp_x, 95.0], [opp_x + 40.0, 95.0], [opp_x + 40.0, 125.0], [opp_x, 125.0]], "季", 0.55),
+                # New single-frame flicker '白' @ 0.52 on Frame 2 -> streak=1 < 2 -> FILTERED
+                ([[opp_x, 150.0], [opp_x + 40.0, 150.0], [opp_x + 40.0, 180.0], [opp_x, 180.0]], "白", 0.52),
             ],
             None,
         )
@@ -305,11 +321,14 @@ def test_draft_ocr_scanner_min_confidence_filters_noise_without_dropping_picks()
         ocr_callable=fake_rapidocr,
         min_confidence=0.65,
         known_token_min_confidence=0.35,
+        min_consecutive_frames=2,
+        known_tokens=repo.known_ocr_tokens,
     )
     dummy_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+    fsm = DraftStateMachine()
 
-    # Frame 1: Lock Ban [封] while ignoring garbled noise
-    ocr_opp, ocr_my, invoked = scanner.scan_draft_rois(
+    # Frame 1: High-confidence '不知火' & '禁用封陽君' pass immediately; 1-frame '火' (0.52) and '季' (0.55, 1st frame) are held
+    ocr_opp_1, ocr_my_1, invoked_1 = scanner.scan_draft_rois(
         screen_color=dummy_frame,
         screen_gray=None,
         is_active_state=True,
@@ -317,30 +336,27 @@ def test_draft_ocr_scanner_min_confidence_filters_noise_without_dropping_picks()
         in_battle_five_picks=False,
         now=10.0,
     )
-    assert invoked is True
-    assert [r[1] for r in ocr_my] == ["不知火"]
-    assert [r[1] for r in ocr_opp] == ["禁用封陽君", "季"]
+    assert invoked_1 is True
+    assert [r[1] for r in ocr_my_1] == ["不知火"]
+    assert [r[1] for r in ocr_opp_1] == ["禁用封陽君"]
 
-    _, dict_map, multi_shorts, tags_db = get_public_demo_bundle()
-    repo = ShikigamiRepository(tags_db=tags_db, full_to_short_map=dict_map, multi_char_shorts=multi_shorts)
-    fsm = DraftStateMachine()
-    snap1, skip1 = fsm.step(
-        ocr_opp=ocr_opp,
-        ocr_my=ocr_my,
-        sorted_full_to_short=repo.sorted_full_to_short,
-        my_ban="禪",
-        now=10.0,
-    )
-    assert skip1 is False
+    snap1, _ = fsm.step(ocr_opp_1, ocr_my_1, repo.sorted_full_to_short, my_ban="禪", now=10.0)
     assert snap1.opp_ban == "封"
 
-    # Frame 2 (after Ban header disappears): single-char "季" @ 0.58 is registered as Enemy Pick 1!
-    snap2, _ = fsm.step(
-        ocr_opp=[r for r in ocr_opp if "禁用" not in r[1]],
-        ocr_my=ocr_my,
-        sorted_full_to_short=repo.sorted_full_to_short,
-        my_ban="禪",
+    # Frame 2 (even on a static dummy_frame, pending '季' streak bypasses motion-diff skip!):
+    # Transient '火' (0.52) vanished and never leaked; persistent '季' (0.55) is confirmed on Frame 2!
+    ocr_opp_2, ocr_my_2, invoked_2 = scanner.scan_draft_rois(
+        screen_color=dummy_frame,
+        screen_gray=None,
+        is_active_state=True,
+        has_locked_opp_ban=True,
+        in_battle_five_picks=False,
         now=11.0,
     )
+    assert invoked_2 is True
+    assert [r[1] for r in ocr_my_2] == ["不知火"]
+    assert [r[1] for r in ocr_opp_2] == ["季"]
+
+    snap2, _ = fsm.step(ocr_opp_2, ocr_my_2, repo.sorted_full_to_short, my_ban="禪", now=11.0)
     assert snap2.opp_draft == ["季"]
     assert snap2.my_draft == ["離"]
