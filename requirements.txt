@@ -1,0 +1,23 @@
+# Core Computer Vision & Numeric Processing
+numpy>=1.24.0
+opencv-python>=4.8.0
+
+# Neural Detection & Deep Learning Runtime
+ultralytics>=8.0.0
+rapidocr-onnxruntime>=1.3.0
+
+# Windows System & GUI Automation
+pygetwindow>=0.0.9
+pywin32>=306; sys_platform == 'win32'
+
+# Native Binary Release Packaging
+Cython>=3.0.0
+PyInstaller>=6.0.0
+setuptools>=65.0.0
+
+# Quality Assurance & Testing
+pytest>=8.0.0
+ruff>=0.4.0
+
+# Optional Local LLM Inference Engine (Gemma-4 GGUF)
+llama-cpp-python>=0.2.70; sys_platform == 'win32'

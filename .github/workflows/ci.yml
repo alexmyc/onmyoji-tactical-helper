@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  quality-and-tests:
+    name: Ruff Lint & Offline Unit Tests
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install core & test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy opencv-python pygetwindow pywin32 pytest ruff
+
+      - name: Run Ruff static linter
+        run: python -m ruff check src tests run_app.py build_release.py
+
+      - name: Run offline unit test suite
+        run: python -m pytest -v

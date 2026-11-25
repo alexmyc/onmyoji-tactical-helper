@@ -1,17 +1,51 @@
-__pycache__/
-*.pyc
-*.pyd
-*.c
-build/
-src_backup/
-
-*.pt
-*.gguf
-best.pt
-gemma-4-E2B-it-Q4_K_M.gguf
-
-cache_db.enc
-*.log
+# Local environment secrets & private cloud endpoints (NEVER commit)
 .env
+.env.*
+!.env.example
+*.local.*
 
-*.bat
+# Byte-compiled / optimized / native C-extension binaries
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.so
+*.c
+*.obj
+*.exp
+*.lib
+
+# Distribution / PyInstaller / Cython staging
+build/
+dist/
+_cython_tmp/
+_release_stage/
+_pyinstaller_work/
+*.spec
+*.egg-info/
+.eggs/
+
+# Runtime logs, shortcuts & temporary artifacts
+logs/
+*.log
+*.tmp
+*.lnk
+
+# Local AI model weights (excluded from Git; bundled into data/ during release build)
+*.pt
+*.onnx
+*.gguf
+
+# Testing & static analysis caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments & IDE settings
+.venv/
+venv/
+env/
+.vscode/
+.idea/
