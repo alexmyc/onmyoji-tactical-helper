@@ -655,8 +655,7 @@ def build_pyinstaller_command(
 
     # 1. Mandatory hidden imports & pywin32 DLLs across ALL 4 profiles
     for dep in COMMON_HIDDEN_IMPORTS:
-        if _is_module_available(dep.split(".")[0]) or dep in sys.stdlib_module_names:
-            cmd.append(f"--hidden-import={dep}")
+        cmd.append(f"--hidden-import={dep}")
     if _is_module_available("pywintypes"):
         cmd.append("--collect-binaries=pywin32_system32")
         purelib = sysconfig.get_paths().get("purelib", "")
