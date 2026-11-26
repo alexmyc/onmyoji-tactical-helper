@@ -1,9 +1,9 @@
 """Draft Screen OCR Scanner Module for Onmyoji Tactical Helper.
 
-Encapsulates RapidOCR lazy initialization (DirectML/CPU memory-isolated, `use_cls=True`,
-2 intra-op threads), Ban-phase widened top-center ROI (`x >= 0.38`), dual-column horizontal
-stitching, localized motion-diff throttling, and two-tier + multi-frame temporal consistency
-filtering using domain tokens injected from `ShikigamiRepository`.
+Encapsulates RapidOCR lazy initialization (DirectML/CPU memory-isolated, `use_cls=False`
+matching `daf2cea` horizontal UI layout), Ban-phase widened top-center ROI (`x >= 0.36`),
+adaptive target-height scaling across shrunk/native/enlarged windows, localized 98th-percentile
+motion-diff gating, and two-tier confidence filtering.
 """
 
 import logging
@@ -16,43 +16,85 @@ import numpy as np
 
 logger = logging.getLogger("OnmyojiHelper")
 
-MIN_OPP_ROI_WIDTH: int = 500
-OCR_FALLBACK_INTERVAL: float = 3.0
+# Adaptive target height band for `roi_opp_color` (`h_opp ≈ 0.55 * client_h`):
+# - Shrunk window (e.g. 540p, h_opp≈297, glyph≈15px): upscales to 400px (glyph≈21px) via INTER_LINEAR.
+# - Native window (e.g. 720p–833p, h_opp≈380–460, glyph≈20–25px): kept 1:1 without blur!
+# - Enlarged/1080p+ window (h_opp>460, glyph≈30–45px): area-downscales to 440px via INTER_AREA,
+#   suppressing high-res background filigree and preventing over-stretched brush strokes.
+MIN_TARGET_OPP_ROI_HEIGHT: int = 380
+UPSCALED_OPP_ROI_HEIGHT: int = 400
+MAX_TARGET_OPP_ROI_HEIGHT: int = 460
+DOWNSCALED_OPP_ROI_HEIGHT: int = 440
+
+OCR_FALLBACK_INTERVAL: float = 1.2
 IN_BATTLE_DIFF_INTERVAL: float = 4.5
-DEFAULT_MIN_OCR_CONFIDENCE: float = 0.65
-DEFAULT_KNOWN_TOKEN_MIN_CONFIDENCE: float = 0.35
+DRAFT_MEAN_DIFF_THRESH: float = 3.2
+DRAFT_PEAK_DIFF_THRESH: float = 12.0
+DEFAULT_MIN_OCR_CONFIDENCE: float = 0.42
+DEFAULT_KNOWN_TOKEN_MIN_CONFIDENCE: float = 0.28
 DEFAULT_MIN_CONSECUTIVE_FRAMES: int = 2
 
 # UI-structural Ban-header keywords only (domain shikigami tokens are injected via `known_tokens`)
 _DRAFT_HEADER_KEYWORDS: frozenset[str] = frozenset({"禁", "禁選", "禁选", "禁用"})
 
 
-def _normalize_matched_known_token(text: str, known_whitelist: frozenset[str]) -> str | None:
+def _normalize_matched_known_token(
+    text: str,
+    known_whitelist: frozenset[str],
+    multi_char_known: tuple[str, ...] = (),
+) -> str | None:
     """Returns a canonical token key if `text` matches injected `known_tokens` or Ban headers."""
     cleaned = text.strip()
     if not cleaned:
         return None
     if cleaned in known_whitelist or cleaned in _DRAFT_HEADER_KEYWORDS:
         return cleaned
-    if len(cleaned) <= 6 and any(kw in cleaned for kw in ("禁用", "禁選", "禁选")):
+    if any(kw in cleaned for kw in ("禁用", "禁選", "禁选")):
         remainder = (
-            cleaned.replace("禁用", "").replace("禁選", "").replace("禁选", "").strip()
+            cleaned.replace("禁用", "")
+            .replace("禁選", "")
+            .replace("禁选", "")
+            .replace("對方", "")
+            .replace("对方", "")
+            .strip()
         )
         if not remainder or remainder in known_whitelist:
             return cleaned
+        for mk in multi_char_known:
+            if mk in remainder:
+                return mk
+    for mk in multi_char_known:
+        if mk in cleaned:
+            return mk
     return None
 
 
 def get_downsampled_blur(img_gray: np.ndarray | None) -> np.ndarray | None:
-    """Generates a 120x80 Gaussian-blurred thumbnail for localized ROI motion-diff gating."""
+    """Generates a 120x80 area-averaged Gaussian-blurred thumbnail so 1080p thin strokes never alias."""
     if img_gray is None or img_gray.size == 0:
         return None
-    small = cv2.resize(img_gray, (120, 80), interpolation=cv2.INTER_NEAREST)
+    small = cv2.resize(img_gray, (120, 80), interpolation=cv2.INTER_AREA)
     return cv2.GaussianBlur(small, (5, 5), 0)
 
 
+def compute_adaptive_opp_size(w_opp: int, h_opp: int) -> tuple[int, int, int]:
+    """Computes `(target_w_opp, target_h_opp, cv2_interp)` keeping glyphs in the 20–25px sweet spot."""
+    if w_opp <= 0 or h_opp <= 0:
+        return max(1, w_opp), max(1, h_opp), cv2.INTER_LINEAR
+
+    if h_opp < MIN_TARGET_OPP_ROI_HEIGHT:
+        scale = min(1.65, float(UPSCALED_OPP_ROI_HEIGHT) / float(h_opp))
+        return max(1, int(round(w_opp * scale))), max(1, int(round(h_opp * scale))), cv2.INTER_LINEAR
+
+    if h_opp > MAX_TARGET_OPP_ROI_HEIGHT:
+        scale = float(DOWNSCALED_OPP_ROI_HEIGHT) / float(h_opp)
+        return max(1, int(round(w_opp * scale))), max(1, int(round(h_opp * scale))), cv2.INTER_AREA
+
+    return w_opp, h_opp, cv2.INTER_LINEAR
+
+
 class DraftOcrScanner:
-    """Performs motion-throttled dual-column RapidOCR scanning with temporal token verification."""
+    """Performs motion-throttled dual-column RapidOCR scanning with adaptive height scaling."""
 
     def __init__(
         self,
@@ -70,6 +112,9 @@ class DraftOcrScanner:
         self.known_whitelist: frozenset[str] = frozenset(
             t.strip() for t in (known_tokens or ()) if t and t.strip()
         )
+        self._multi_char_known: tuple[str, ...] = tuple(
+            sorted((t for t in self.known_whitelist if len(t) >= 2), key=len, reverse=True)
+        )
 
         self.prev_opp_small_blur: np.ndarray | None = None
         self.prev_my_small_blur: np.ndarray | None = None
@@ -78,7 +123,7 @@ class DraftOcrScanner:
         self._token_streaks: dict[str, dict[str, int]] = {}
 
     def _ensure_ocr_engine(self) -> Callable[[np.ndarray], tuple[Any, Any]]:
-        """Lazily initializes RapidOCR on first scan so importing this module has zero overhead."""
+        """Lazily initializes RapidOCR (`use_cls=False` matching `daf2cea` horizontal layout)."""
         if self._ocr_engine is None:
             from rapidocr_onnxruntime import RapidOCR
 
@@ -86,7 +131,7 @@ class DraftOcrScanner:
                 providers=["DmlExecutionProvider", "CPUExecutionProvider"],
                 intra_op_num_threads=2,
                 inter_op_num_threads=1,
-                use_cls=True,
+                use_cls=False,
                 det_box_thresh=0.3,
                 det_unclip_ratio=1.8,
                 det_thresh=0.3,
@@ -110,6 +155,16 @@ class DraftOcrScanner:
             for streak in col_streaks.values()
         )
 
+    @staticmethod
+    def _is_roi_static(curr_blur: np.ndarray, prev_blur: np.ndarray) -> bool:
+        """Checks both global mean diff and 99.5th-percentile localized patch diff (~0.5% ROI card label)."""
+        delta = cv2.absdiff(curr_blur, prev_blur)
+        mean_diff = float(cv2.mean(delta)[0])
+        if mean_diff >= DRAFT_MEAN_DIFF_THRESH:
+            return False
+        peak_diff = float(np.percentile(delta, 99.5))
+        return peak_diff < DRAFT_PEAK_DIFF_THRESH
+
     def _filter_column_temporal(
         self,
         column_key: str,
@@ -119,9 +174,9 @@ class DraftOcrScanner:
     ) -> tuple[list[Any], int]:
         """Applies two-tier + cross-frame consecutive verification to a single ROI column.
 
-        - `score >= min_conf` (0.65): immediate single-frame pass.
-        - `known_conf <= score < min_conf` (0.35..0.65) AND in `known_whitelist`: requires
-          appearing in `min_consecutive_frames` (2) consecutive scans of `column_key`.
+        - `score >= min_conf` (default `0.42`): immediate single-frame pass.
+        - `known_conf <= score < min_conf` (`0.28..0.42`) AND in `known_whitelist`: requires
+          appearing in `min_consecutive_frames` (`2`) consecutive scans of `column_key`.
         - Otherwise: dropped immediately.
         """
         if min_conf <= 0.0:
@@ -144,7 +199,9 @@ class DraftOcrScanner:
                 continue
 
             raw_text = str(res[1]) if len(res) >= 2 and res[1] is not None else ""
-            matched_tok = _normalize_matched_known_token(raw_text, self.known_whitelist)
+            matched_tok = _normalize_matched_known_token(
+                raw_text, self.known_whitelist, self._multi_char_known
+            )
 
             if score >= min_conf:
                 if matched_tok is not None:
@@ -155,7 +212,6 @@ class DraftOcrScanner:
                     )
                 kept.append(res)
             elif score >= known_conf and matched_tok is not None:
-                # Increment strictly once per frame relative to `prev_streaks`
                 new_streak = max(next_streaks.get(matched_tok, 0), prev_streaks.get(matched_tok, 0) + 1)
                 next_streaks[matched_tok] = new_streak
                 if new_streak >= required_frames:
@@ -190,10 +246,13 @@ class DraftOcrScanner:
         if screen_gray is None:
             screen_gray = cv2.cvtColor(screen_color, cv2.COLOR_BGR2GRAY)
 
-        # Extend left boundary to 0.38 before Ban lock so top-center "禁選" badge is never clipped
-        opp_x_start = int(w * 0.38) if not has_locked_opp_ban else int(w * 0.45)
-        roi_opp_color = screen_color[0 : int(h * 0.52), opp_x_start : int(w * 0.92)]
-        roi_opp_motion_gray = screen_gray[0 : int(h * 0.48), int(w * 0.35) : int(w * 0.90)]
+        # Extend left boundary to 0.36 before Ban lock so top-center Ban badge/name is never clipped;
+        # extend bottom to 0.55 so Pick 5 at bottom of column is fully covered in both OCR and motion diff.
+        opp_x_start = int(w * 0.36) if not has_locked_opp_ban else int(w * 0.45)
+        opp_x_end = int(w * 0.94)
+        opp_y_end = int(h * 0.55)
+        roi_opp_color = screen_color[0:opp_y_end, opp_x_start:opp_x_end]
+        roi_opp_motion_gray = screen_gray[0:opp_y_end, int(w * 0.36) : opp_x_end]
 
         curr_opp_small_blur = get_downsampled_blur(roi_opp_motion_gray)
         curr_my_small_blur: np.ndarray | None = None
@@ -206,11 +265,14 @@ class DraftOcrScanner:
                 if diff_opp < 6.0 and (now_ts - self.last_ocr_time) < IN_BATTLE_DIFF_INTERVAL:
                     run_ocr = False
         else:
-            roi_my_color = screen_color[int(h * 0.10) : int(h * 0.52), int(w * 0.10) : int(w * 0.20)]
-            roi_my_motion_gray = screen_gray[int(h * 0.10) : int(h * 0.48), int(w * 0.10) : int(w * 0.20)]
+            my_y_start, my_y_end = int(h * 0.08), opp_y_end
+            my_x_start, my_x_end = int(w * 0.08), int(w * 0.22)
+            roi_my_color = screen_color[my_y_start:my_y_end, my_x_start:my_x_end]
+            roi_my_motion_gray = screen_gray[my_y_start:my_y_end, my_x_start:my_x_end]
             curr_my_small_blur = get_downsampled_blur(roi_my_motion_gray)
 
-            # Never skip OCR before Ban lock or while a medium-confidence token awaits 2nd-frame confirmation
+            # Never skip OCR before Ban lock or while a token awaits 2nd-frame confirmation;
+            # cap static skip at `OCR_FALLBACK_INTERVAL = 1.2s` matching `daf2cea`!
             if (
                 is_active_state
                 and has_locked_opp_ban
@@ -220,11 +282,9 @@ class DraftOcrScanner:
                 and self.prev_my_small_blur is not None
                 and curr_my_small_blur is not None
             ):
-                diff_opp = cv2.mean(cv2.absdiff(curr_opp_small_blur, self.prev_opp_small_blur))[0]
-                diff_my = cv2.mean(cv2.absdiff(curr_my_small_blur, self.prev_my_small_blur))[0]
                 if (
-                    diff_opp < 8.0
-                    and diff_my < 8.0
+                    self._is_roi_static(curr_opp_small_blur, self.prev_opp_small_blur)
+                    and self._is_roi_static(curr_my_small_blur, self.prev_my_small_blur)
                     and (now_ts - self.last_ocr_time) < OCR_FALLBACK_INTERVAL
                 ):
                     run_ocr = False
@@ -253,7 +313,7 @@ class DraftOcrScanner:
                     settle_img = cv2.resize(
                         roi_opp_color,
                         (640, max(1, int(h_opp * scale))),
-                        interpolation=cv2.INTER_LINEAR,
+                        interpolation=cv2.INTER_AREA,
                     )
                 else:
                     settle_img = roi_opp_color
@@ -275,21 +335,23 @@ class DraftOcrScanner:
             else (0, 0)
         )
         if h_opp > 0 and w_opp > 0 and h_my > 0 and w_my > 0 and roi_my_color is not None:
-            if w_opp < MIN_OPP_ROI_WIDTH:
-                target_w_opp = 640
-                target_h_opp = max(1, int(h_opp * (target_w_opp / float(w_opp))))
+            target_w_opp, target_h_opp, opp_interp = compute_adaptive_opp_size(w_opp, h_opp)
+            if (target_w_opp, target_h_opp) == (w_opp, h_opp):
+                img_opp_resized = roi_opp_color
             else:
-                target_w_opp = max(1, int(w_opp * 1.30))
-                target_h_opp = max(1, int(h_opp * 1.30))
+                img_opp_resized = cv2.resize(
+                    roi_opp_color, (target_w_opp, target_h_opp), interpolation=opp_interp
+                )
 
-            img_opp_resized = cv2.resize(
-                roi_opp_color, (target_w_opp, target_h_opp), interpolation=cv2.INTER_LINEAR
-            )
             target_h_my = target_h_opp
-            target_w_my = max(1, int(w_my * (target_h_my / float(h_my))))
-            img_my_resized = cv2.resize(
-                roi_my_color, (target_w_my, target_h_my), interpolation=cv2.INTER_LINEAR
-            )
+            target_w_my = max(1, int(round(w_my * (target_h_my / float(h_my)))))
+            my_interp = cv2.INTER_AREA if target_h_my < h_my else cv2.INTER_LINEAR
+            if (target_w_my, target_h_my) == (w_my, h_my):
+                img_my_resized = roi_my_color
+            else:
+                img_my_resized = cv2.resize(
+                    roi_my_color, (target_w_my, target_h_my), interpolation=my_interp
+                )
 
             combined_roi = np.hstack((img_my_resized, img_opp_resized))
             x_border = target_w_my

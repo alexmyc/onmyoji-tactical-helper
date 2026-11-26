@@ -23,7 +23,11 @@ import onmyoji_helper.vision.turn_detector as turn_mod
 from onmyoji_helper.decision.draft_fsm import DraftStateMachine
 from onmyoji_helper.domain.public_demo_data import get_public_demo_bundle
 from onmyoji_helper.domain.shikigami_repository import ShikigamiRepository
-from onmyoji_helper.vision.draft_ocr_scanner import DraftOcrScanner
+from onmyoji_helper.vision.draft_ocr_scanner import (
+    DEFAULT_MIN_OCR_CONFIDENCE,
+    DraftOcrScanner,
+    compute_adaptive_opp_size,
+)
 from onmyoji_helper.vision.spatial_tracker import StateParser
 from onmyoji_helper.vision.turn_detector import TurnDetector
 
@@ -361,3 +365,48 @@ def test_draft_ocr_scanner_min_confidence_filters_noise_without_dropping_picks()
     snap2, _ = fsm.step(ocr_opp_2, ocr_my_2, repo.sorted_full_to_short, my_ban="禪", now=11.0)
     assert snap2.opp_draft == ["季"]
     assert snap2.my_draft == ["離"]
+
+
+def test_draft_ocr_adaptive_resolution_scaling_and_1080p_localized_flip_motion() -> None:
+    """Verifies adaptive ROI height scaling across 540p/720p/1080p and localized Pick-5 motion sensitivity."""
+    assert 0.40 <= DEFAULT_MIN_OCR_CONFIDENCE <= 0.45
+
+    # 1. Shrunk 540p window (h_opp = 297 < 380) -> upscales to ~400px with INTER_LINEAR
+    w540, h540, interp540 = compute_adaptive_opp_size(470, 297)
+    assert h540 == 400 and w540 > 470 and interp540 == cv2.INTER_LINEAR
+
+    # 2. Native 720p/800p window (h_opp = 396..440 in [380, 460]) -> 1:1 native pixels (no 1.30x blur!)
+    w720, h720, _ = compute_adaptive_opp_size(627, 396)
+    assert (w720, h720) == (627, 396)
+
+    # 3. Enlarged 1080p window (h_opp = 594 > 460) -> downscales to 440px with INTER_AREA
+    w1080, h1080, interp1080 = compute_adaptive_opp_size(940, 594)
+    assert h1080 == 440 and w1080 < 940 and interp1080 == cv2.INTER_AREA
+
+    # 4. At 1920x1080, a localized Pick-5 name flip at y=0.50*h (~2% of ROI area, mean diff < 2.0)
+    #    MUST still trigger OCR immediately via the 98th-percentile peak diff gate AND pass at score=0.46!
+    _, dict_map, multi_shorts, tags_db = get_public_demo_bundle()
+    repo = ShikigamiRepository(tags_db=tags_db, full_to_short_map=dict_map, multi_char_shorts=multi_shorts)
+
+    seen_heights: list[int] = []
+
+    def fake_1080p_ocr(stitched: np.ndarray) -> tuple[list[Any], None]:
+        seen_heights.append(stitched.shape[0])
+        opp_x = float(stitched.shape[1] - 120)
+        return ([([[opp_x, 360.0], [opp_x + 80, 360.0], [opp_x + 80, 390.0], [opp_x, 390.0]], "八岐大蛇", 0.46)], None)
+
+    scanner = DraftOcrScanner(ocr_callable=fake_1080p_ocr, known_tokens=repo.known_ocr_tokens)
+    base_1080p = np.full((1080, 1920, 3), 30, dtype=np.uint8)
+    _, _, ran1 = scanner.scan_draft_rois(
+        base_1080p, None, is_active_state=True, has_locked_opp_ban=True, in_battle_five_picks=False, now=1.0
+    )
+    assert ran1 is True and seen_heights == [440]
+
+    # Flip Pick 5 label in a small localized patch at y = 530..570 (0.49..0.53 * 1080) only 0.4s later!
+    flip_1080p = base_1080p.copy()
+    flip_1080p[530:570, 1450:1620] = 210
+    opp_res, _, ran2 = scanner.scan_draft_rois(
+        flip_1080p, None, is_active_state=True, has_locked_opp_ban=True, in_battle_five_picks=False, now=1.4
+    )
+    assert ran2 is True
+    assert [r[1] for r in opp_res] == ["八岐大蛇"]
