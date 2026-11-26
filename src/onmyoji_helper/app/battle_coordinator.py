@@ -39,10 +39,10 @@ class AITacticalManager:
     POLL_ENTRY_SETTLE: float = 0.20
     POST_DECISION_BUFFER_RANGE: tuple[float, float] = (1.0, 1.5)
     DRAFT_FADE_GRACE_SEC: float = 2.5
-    SETTLED_MIN_CONSECUTIVE_FRAMES: int = 2
-    SETTLED_MAX_MEAN_DISP_RATIO: float = 0.018
-    SETTLED_MAX_PEAK_DISP_RATIO: float = 0.035
-    BATTLE_SETTLE_FALLBACK_SEC: float = 4.5
+    PROVISIONAL_OPENING_DELAY_SEC: float = 3.5
+    STEALTH_FALLBACK_DELAY_SEC: float = 5.5
+    MY_TURN_MEAN_DRIFT_RATIO: float = 0.025
+    MY_TURN_MAX_DRIFT_RATIO: float = 0.045
 
     def __init__(self, repository: ShikigamiRepository | None = None) -> None:
         self.models: ModelLifecycleManager = ModelLifecycleManager()
@@ -71,10 +71,8 @@ class AITacticalManager:
 
         self.no_box_start_time: float = 0.0
         self.session_start_time: float = 0.0
-        self.settled_entry_frames: int = 0
-        self._entry_first_unit_ts: float = 0.0
-        self._entry_prev_opp: list[tuple[float, float]] = []
-        self._entry_prev_my: list[tuple[float, float]] = []
+        self.has_calibrated_on_my_turn: bool = False
+        self.is_provisional_baseline: bool = False
         self._frame_seq: int = 0
 
         self.is_ai_reasoning: bool = False
@@ -248,11 +246,9 @@ class AITacticalManager:
             self.close_ui()
 
     def _reset_entry_gate_state(self) -> None:
-        """Clears pre-battle camera-settle history so transitional frames never leak across sessions."""
-        self.settled_entry_frames = 0
-        self._entry_first_unit_ts = 0.0
-        self._entry_prev_opp = []
-        self._entry_prev_my = []
+        """Clears turn-calibration and provisional baseline flags across session/mode resets."""
+        self.has_calibrated_on_my_turn = False
+        self.is_provisional_baseline = False
 
     @staticmethod
     def _extract_valid_combat_points(
@@ -281,132 +277,64 @@ class AITacticalManager:
         )
         return opp_pts, my_pts
 
-    @classmethod
-    def _camp_displacements(
-        cls,
-        prev_pts: list[tuple[float, float]],
-        curr_pts: list[tuple[float, float]],
-    ) -> list[float] | None:
-        """Computes one-to-one nearest-neighbor displacements; returns None if unit count jumped > 1."""
-        if not prev_pts and not curr_pts:
-            return []
-        if not prev_pts or not curr_pts or abs(len(curr_pts) - len(prev_pts)) > 1:
-            return None
-
-        small, large = (prev_pts, curr_pts) if len(prev_pts) <= len(curr_pts) else (curr_pts, prev_pts)
-        candidates: list[tuple[float, int, int]] = []
-        for s_idx, (sx, sy) in enumerate(small):
-            for l_idx, (lx, ly) in enumerate(large):
-                candidates.append((float(np.hypot(sx - lx, sy - ly)), s_idx, l_idx))
-        candidates.sort(key=lambda item: item[0])
-
-        used_s: set[int] = set()
-        used_l: set[int] = set()
-        disps: list[float] = []
-        for dist, s_idx, l_idx in candidates:
-            if s_idx not in used_s and l_idx not in used_l:
-                used_s.add(s_idx)
-                used_l.add(l_idx)
-                disps.append(dist)
-        return disps if len(disps) == len(small) else None
-
-    def _are_point_sets_motion_settled(
-        self,
-        prev_opp: list[tuple[float, float]],
-        prev_my: list[tuple[float, float]],
-        curr_opp: list[tuple[float, float]],
-        curr_my: list[tuple[float, float]],
-        screen_w: int,
-    ) -> bool:
-        """Returns True if inter-frame box centers have settled (camera swoop & unit landing finished)."""
-        if screen_w <= 0:
-            return False
-        opp_disps = self._camp_displacements(prev_opp, curr_opp)
-        my_disps = self._camp_displacements(prev_my, curr_my)
-        if opp_disps is None or my_disps is None:
-            return False
-
-        all_disps = opp_disps + my_disps
-        if not all_disps:
-            return False
-
-        mean_disp = sum(all_disps) / float(len(all_disps))
-        peak_disp = max(all_disps)
-        return (
-            mean_disp <= (screen_w * self.SETTLED_MAX_MEAN_DISP_RATIO)
-            and peak_disp <= (screen_w * self.SETTLED_MAX_PEAK_DISP_RATIO)
-        )
-
-    def _check_battlefield_settled(
+    def _should_open_provisional_before_my_turn(
         self,
         raw_opp: list[tuple[float, float]],
         raw_my: list[tuple[float, float]],
-        is_my_turn: bool,
-        screen_w: int,
         now: float,
+        from_five_picks_lock: bool,
     ) -> bool:
-        """Enforces the Settled Battlefield Entry Gate before initializing `StateParser` baselines.
+        """Determines whether enemy-first provisional tracking may start while awaiting our first turn.
 
-        - Standard Entry: `>= 2` consecutive frames with BOTH ally and enemy units visible AND
-          settled inter-frame center displacement (`mean <= 0.018*w`, `peak <= 0.035*w`).
-        - Explicit Turn Entry: `is_my_turn == True` with no active camera swoop from the prior frame.
-        - Anti-Deadlock Fallback: after `>= 4.5s` of seeing units (e.g. stealth / solo-core lineup),
-          allows entry once `>= 2` consecutive single-camp frames are motion-settled.
+        Never triggers on short motion pauses during opening pre-emptive ('先機') animations:
+        waits past `PROVISIONAL_OPENING_DELAY_SEC` (`3.5s`) after 5-pick lock with enemy units on screen
+        (or `STEALTH_FALLBACK_DELAY_SEC` if only ally units are visible), and still forces a full
+        `parser.reset_baseline()` on the very first `is_my_turn == True` skill-bar frame.
         """
-        has_both_sides = len(raw_opp) >= 1 and len(raw_my) >= 1
-        total_raw = len(raw_opp) + len(raw_my)
-        had_prev = bool(self._entry_prev_opp or self._entry_prev_my)
+        elapsed = max(0.0, now - self.session_start_time)
+        required_delay = self.PROVISIONAL_OPENING_DELAY_SEC if from_five_picks_lock else 0.0
+        if len(raw_opp) >= 1 and elapsed >= required_delay:
+            return True
+        stealth_delay = self.STEALTH_FALLBACK_DELAY_SEC if from_five_picks_lock else 1.5
+        return len(raw_my) >= 1 and elapsed >= stealth_delay
 
-        if total_raw >= 1 and self._entry_first_unit_ts == 0.0:
-            self._entry_first_unit_ts = now
+    def _recalibrate_opp_if_drifted_on_my_turn(
+        self,
+        raw_opp: list[tuple[float, float]],
+        screen_w: int,
+    ) -> bool:
+        """Self-heals enemy baseline on `is_my_turn` when all 5 distinct enemies are visible and drifted."""
+        if screen_w <= 0 or len(raw_opp) != 5:
+            return False
+        if not all((raw_opp[i + 1][0] - raw_opp[i][0]) >= (screen_w * 0.03) for i in range(4)):
+            return False
 
-        motion_settled = (
-            self._are_point_sets_motion_settled(
-                self._entry_prev_opp, self._entry_prev_my, raw_opp, raw_my, screen_w
+        drifts: list[float] = []
+        missing_slot = False
+        for idx, (slot_name, _) in enumerate(self.parser.OPP_SLOT_ANCHORS):
+            tracked = self.parser.smooth_pos_opp.get(slot_name) or self.parser.baseline_opp.get(slot_name)
+            if tracked is None:
+                missing_slot = True
+                break
+            rx, ry = raw_opp[idx]
+            drifts.append(float(np.hypot(rx - tracked[0], ry - tracked[1])))
+
+        should_refresh = missing_slot or (
+            bool(drifts)
+            and (
+                (sum(drifts) / float(len(drifts))) > (screen_w * self.MY_TURN_MEAN_DRIFT_RATIO)
+                or max(drifts) > (screen_w * self.MY_TURN_MAX_DRIFT_RATIO)
             )
-            if (had_prev and total_raw >= 1)
-            else False
         )
-
-        # 1. Explicit ally skill-bar turn: immediate if clean start or camera motion has settled
-        if is_my_turn:
-            if not had_prev or total_raw == 0 or motion_settled:
-                return True
-            self._entry_prev_opp = raw_opp
-            self._entry_prev_my = raw_my
-            self.settled_entry_frames = 1
-            return False
-
-        if total_raw == 0:
-            self.settled_entry_frames = 0
-            self._entry_prev_opp = []
-            self._entry_prev_my = []
-            return False
-
-        # 2. Both camps visible: require >= 2 consecutive motion-settled dual-camp frames
-        if has_both_sides:
-            prev_had_both = len(self._entry_prev_opp) >= 1 and len(self._entry_prev_my) >= 1
-            if prev_had_both and motion_settled:
-                self.settled_entry_frames += 1
-            else:
-                self.settled_entry_frames = 1
-            self._entry_prev_opp = raw_opp
-            self._entry_prev_my = raw_my
-            return self.settled_entry_frames >= self.SETTLED_MIN_CONSECUTIVE_FRAMES
-
-        # 3. Anti-deadlock fallback (>= 4.5s) for extreme stealth / solo-core formations
-        if had_prev and motion_settled:
-            self.settled_entry_frames += 1
-        else:
-            self.settled_entry_frames = 1
-        self._entry_prev_opp = raw_opp
-        self._entry_prev_my = raw_my
-
-        wait_elapsed = (now - self._entry_first_unit_ts) if self._entry_first_unit_ts > 0.0 else 0.0
-        return (
-            wait_elapsed >= self.BATTLE_SETTLE_FALLBACK_SEC
-            and self.settled_entry_frames >= self.SETTLED_MIN_CONSECUTIVE_FRAMES
-        )
+        if should_refresh:
+            with self.models.yolo_lock:
+                self.parser.baseline_opp.clear()
+                self.parser.smooth_pos_opp.clear()
+                self.parser.last_seen_opp.clear()
+                self.parser.is_opp_baseline_set = False
+            logger.info("🔄 [BattleLoop] 我方回合 5 敵基準自檢發現偏移，已自動刷新敵方標準基準。")
+            return True
+        return False
 
     def reset_to_blank(self, root_window: tk.Tk | None) -> None:
         """Resets battle session state and closes HUD & advice panels on match end."""
@@ -647,14 +575,21 @@ class AITacticalManager:
                     self._wake_event.clear()
                     continue
 
-                # Settled Battlefield Entry Gate: NEVER call `parser.parse_frame` during VS banners
-                # or opening camera swoop! Wait until units have landed and settled across >= 2 frames
-                # (or explicit ally turn / 4.5s stealth fallback), then reset baseline cleanly on entry.
+                raw_opp_pts, raw_my_pts = self._extract_valid_combat_points(boxes_data, screen_w, screen_h)
+
+                # Deterministic Turn-UI Baseline Gate:
+                # 1) Never lock on static pauses during VS / opening '先機' animations.
+                # 2) Primary trigger: `is_my_turn == True` (skill bar rendered -> canonical combat camera!).
+                # 3) Enemy-first fallback: provisional entry after opening buffer, followed by a MANDATORY
+                #    `parser.reset_baseline()` hard recalibration on the very first `is_my_turn == True` frame!
                 if not self.battle_has_started:
-                    raw_opp_pts, raw_my_pts = self._extract_valid_combat_points(boxes_data, screen_w, screen_h)
-                    if not self._check_battlefield_settled(
-                        raw_opp_pts, raw_my_pts, is_my_turn, screen_w, current_time
-                    ):
+                    can_enter_provisional = (
+                        not is_my_turn
+                        and self._should_open_provisional_before_my_turn(
+                            raw_opp_pts, raw_my_pts, current_time, from_five_picks_lock
+                        )
+                    )
+                    if not is_my_turn and not can_enter_provisional:
                         if (current_time - self.session_start_time) >= 90.0:
                             self.reset_to_blank(root_window)
                             break
@@ -664,9 +599,14 @@ class AITacticalManager:
 
                     with self.models.yolo_lock:
                         self.parser.reset_baseline()
-                    self._reset_entry_gate_state()
                     self.battle_has_started = True
+                    self.has_calibrated_on_my_turn = bool(is_my_turn)
+                    self.is_provisional_baseline = not bool(is_my_turn)
                     self.no_box_start_time = 0.0
+                    if self.is_provisional_baseline:
+                        logger.info(
+                            "⏳ [BattleLoop] 敵方先手行動中，啟用臨時追蹤基準（待首個我方回合技能欄就緒後強制重校準）。"
+                        )
                     if self.auto_battle_enabled:
                         self.auto_executor.reset_for_match()
                         self.auto_executor.start_kill_switch_monitor(
@@ -675,6 +615,17 @@ class AITacticalManager:
                         self.auto_executor.is_game_window_foreground(
                             hwnd, allow_reclaim_from_self=True
                         )
+                elif is_my_turn and not self.has_calibrated_on_my_turn:
+                    # Mandatory hard recalibration on the FIRST ally skill-bar turn after enemy-first provisional entry!
+                    with self.models.yolo_lock:
+                        self.parser.reset_baseline()
+                    self.has_calibrated_on_my_turn = True
+                    self.is_provisional_baseline = False
+                    logger.info(
+                        "🎯 [BattleLoop] 首個我方回合技能欄已出現，已強制執行 reset_baseline() 重新鎖定標準敵我基準！"
+                    )
+                elif is_my_turn and self.has_calibrated_on_my_turn:
+                    self._recalibrate_opp_if_drifted_on_my_turn(raw_opp_pts, screen_w)
 
                 my_status, opp_status = self.parser.parse_frame(
                     cur_my_draft, cur_opp_draft, boxes_data, screen_w, screen_height=screen_h

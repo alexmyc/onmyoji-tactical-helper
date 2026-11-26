@@ -301,12 +301,12 @@ def test_draft_portrait_lock_action_bar_to_llm_decision_and_red_mode_execution(
     assert mgr.presenter.ai_ui is None and mgr.presenter.overlay_ui is None
 
 
-def test_pre_armed_red_mode_waits_for_camera_settle_without_baseline_pollution(
+def test_opening_preemptive_pause_never_locks_until_skill_bar_my_turn_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end verification of the Settled Battlefield Entry Gate:
-    Pre-arming Red/Yellow Mode during Ban/Pick -> surviving VS banner + high-speed camera swoop
-    frames -> locking clean `StateParser` baselines ONLY after units land and stabilize.
+    """Scenario 1: Pre-armed Red/Yellow Mode ignores stationary tilted '先機' animation pauses
+    (`is_my_turn=False`) and cleanly initializes `StateParser` baselines at the exact moment
+    the skill bar first becomes available (`is_my_turn=True`).
     """
     _, dict_map, multi_shorts, tags_db = get_public_demo_bundle()
     repo = ShikigamiRepository(tags_db=tags_db, full_to_short_map=dict_map, multi_char_shorts=multi_shorts)
@@ -315,6 +315,7 @@ def test_pre_armed_red_mode_waits_for_camera_settle_without_baseline_pollution(
     mgr.POLL_OPP_TURN = 0.015
     mgr.POLL_ENTRY_SETTLE = 0.015
     mgr.DRAFT_FADE_GRACE_SEC = 0.01
+    mgr.PROVISIONAL_OPENING_DELAY_SEC = 3.5
 
     monkeypatch.setattr(mgr.models, "warmup_in_background", lambda: None)
     monkeypatch.setattr(mgr.models, "ensure_loaded", lambda should_abort_fn=None: True)
@@ -328,18 +329,33 @@ def test_pre_armed_red_mode_waits_for_camera_settle_without_baseline_pollution(
         key_checker=lambda _vk: False,
         uipi_checker=lambda _h: False,
     )
+    mgr.turn_detector.ACTIVATION_THRESHOLD = 0.01
 
     w, h = 1280, 720
-    draft_frame, _ = _build_draft_and_combat_frames(mgr.turn_detector, mgr.action_bar_detector, w, h)
-    passive_combat_frame = np.full((h, w, 3), 22, dtype=np.uint8)
+    draft_frame, active_turn_frame = _build_draft_and_combat_frames(mgr.turn_detector, mgr.action_bar_detector, w, h)
+    preemptive_anim_frame = np.full((h, w, 3), 22, dtype=np.uint8)  # No skill bar during 先機 realm!
+
+    # Canonical combat coords when skill bar opens vs. tilted 先機 realm pause (+185 px skewed!)
+    canonical_opp = [(w * r, h * 0.31) for r in (0.25, 0.35, 0.45, 0.55, 0.65)]
+    canonical_my = [(w * r, h * 0.63) for r in (0.130, 0.315, 0.495, 0.665, 0.835)]
+    tilted_preemptive_boxes: list[_FakeBox] = [
+        _FakeBox(0, x + 185.0, y - 50.0) for x, y in canonical_opp
+    ] + [_FakeBox(1, x - 120.0, y + 40.0) for x, y in canonical_my]
+
+    frame_idx_holder = [0]
+    pre_turn_states: list[tuple[int, bool, bool]] = []
+    overlay_snapshots: list[dict[str, dict[str, Any]]] = []
 
     class _CaptureStub:
         def find_windows(self) -> list[Any]:
             return []
 
         def capture_frame(self, hwnd: int, need_gray: bool = False, window_title: str = "") -> CaptureFrame:
+            # Frames 0..3: stationary tilted 先機 animation (0 px/frame motion -> used to fool 2-frame velocity gate!)
+            # Frames 4+: skill bar appears (`active_turn_frame` -> `is_my_turn == True`)!
+            bgr = preemptive_anim_frame if frame_idx_holder[0] < 4 else active_turn_frame
             return CaptureFrame(
-                bgr=passive_combat_frame,
+                bgr=bgr,
                 gray=None,
                 hwnd=hwnd,
                 window_title=window_title,
@@ -348,39 +364,19 @@ def test_pre_armed_red_mode_waits_for_camera_settle_without_baseline_pollution(
 
     monkeypatch.setattr(coord_mod, "CaptureEngine", _CaptureStub)
 
-    # True landed combat formation (e.g. shifted combat camera x = 0.25..0.65 for enemies)
-    landed_opp = [(w * r, h * 0.31) for r in (0.25, 0.35, 0.45, 0.55, 0.65)]
-    landed_my = [(w * r, h * 0.63) for r in (0.130, 0.315, 0.495, 0.665, 0.835)]
-
-    # Scripted sequence of YOLO frames:
-    # Frame 0: VS banner with 1 spurious silhouette at (0.88w, 0.18h)
-    # Frame 1: High-speed camera swoop (+190 px offset!)
-    # Frame 2: Mid-swoop (+95 px offset -> 95 px inter-frame jump > 0.018*w!)
-    # Frame 3: Units touch down at true landed coords (95 px jump from Frame 2 -> streak=1, NOT opened yet!)
-    # Frame 4: Units settled at true landed coords (±2 px idle breathing -> streak=2 -> LOCK & OPEN!)
-    # Frame 5+: Enemy Slot 1 (index 3, x=0.55w) occluded by opening VFX -> must predict landed x=0.55w, NOT swoop!
-    scripted_frames: list[list[_FakeBox]] = [
-        [_FakeBox(0, w * 0.88, h * 0.18)],
-        [_FakeBox(0, x + 190.0, y - 55.0) for x, y in landed_opp]
-        + [_FakeBox(1, x - 140.0, y + 45.0) for x, y in landed_my],
-        [_FakeBox(0, x + 95.0, y - 28.0) for x, y in landed_opp]
-        + [_FakeBox(1, x - 70.0, y + 22.0) for x, y in landed_my],
-        [_FakeBox(0, x, y) for x, y in landed_opp] + [_FakeBox(1, x, y) for x, y in landed_my],
-        [_FakeBox(0, x + 2.0, y - 1.0) for x, y in landed_opp]
-        + [_FakeBox(1, x - 1.5, y + 1.0) for x, y in landed_my],
-        [_FakeBox(0, x, y) for idx, (x, y) in enumerate(landed_opp) if idx != 3]
-        + [_FakeBox(1, x, y) for x, y in landed_my],
-    ]
-
-    frame_cursor = [0]
-    gate_snapshots: list[tuple[int, bool, bool]] = []
-    overlay_snapshots: list[dict[str, dict[str, Any]]] = []
-
     def _scripted_yolo(_img: np.ndarray) -> list[_FakeYoloResult]:
-        idx = frame_cursor[0]
-        gate_snapshots.append((idx, mgr.battle_has_started, mgr.parser.is_opp_baseline_set))
-        boxes = scripted_frames[idx] if idx < len(scripted_frames) else scripted_frames[-1]
-        frame_cursor[0] += 1
+        idx = frame_idx_holder[0]
+        pre_turn_states.append((idx, mgr.battle_has_started, mgr.parser.is_opp_baseline_set))
+        if idx < 4:
+            boxes = tilted_preemptive_boxes
+        elif idx == 4 or idx == 5:
+            boxes = [_FakeBox(0, x, y) for x, y in canonical_opp] + [_FakeBox(1, x, y) for x, y in canonical_my]
+        else:
+            # Frame 6+: occlude Enemy Slot 1 (index 3, x=0.55w) to verify locked baseline accuracy
+            boxes = [_FakeBox(0, x, y) for i, (x, y) in enumerate(canonical_opp) if i != 3] + [
+                _FakeBox(1, x, y) for x, y in canonical_my
+            ]
+        frame_idx_holder[0] += 1
         return [_FakeYoloResult(boxes)]
 
     monkeypatch.setattr(mgr.models, "predict_yolo", _scripted_yolo)
@@ -403,60 +399,133 @@ def test_pre_armed_red_mode_waits_for_camera_settle_without_baseline_pollution(
     my_picks = ["葛", "帝", "骷", "閻", "連"]
     opp_picks = ["玲", "SP桃", "葛", "酒吞", "季"]
 
-    # 1. User pre-arms Red Mode BEFORE 5-pick lock (during Ban/Pick)
     ctrl = ModeController(mgr)
     ui_stub = _MainUIStub()
     ctrl.set_ui_app(ui_stub)
-    assert ctrl.set_mode("red") is True
+    assert ctrl.set_mode("yellow") is True
     while ctrl.is_busy:
         time.sleep(0.01)
-    assert mgr.battle_has_started is False
 
-    # 2. Pick 5 locks -> enters transition (VS banner -> swoop -> landing)
     assert mgr.capture_draft_templates(draft_frame, my_picks) is True
     ctrl.save_and_handle_five_picks(ui_stub.root, my_picks, opp_picks, draft_frame, 9999)  # type: ignore[arg-type]
 
     deadline = time.time() + 2.5
-    while (frame_cursor[0] < 7 or len(overlay_snapshots) < 2) and time.time() < deadline:
+    while (frame_idx_holder[0] < 8 or len(overlay_snapshots) < 2) and time.time() < deadline:
         time.sleep(0.015)
 
-    # Verify Frames 0..4 (before Frame 4 finished processing) NEVER started battle or polluted baselines!
-    for f_idx, started_before_frame, base_set_before_frame in gate_snapshots:
-        if f_idx <= 4:
-            assert started_before_frame is False, f"Premature battle start before settled frame (f_idx={f_idx})"
-            assert base_set_before_frame is False, f"Baseline polluted during VS/swoop frame (f_idx={f_idx})"
+    # Even across 4 completely motionless tilted 先機 frames (idx 0..3) + TurnDetector's 2-frame debounce (idx 4),
+    # battle MUST NOT start and baselines MUST remain untouched until `is_my_turn` is confirmed (idx 5)!
+    for f_idx, started_before, base_set_before in pre_turn_states:
+        if f_idx <= 5:
+            assert started_before is False, f"Locked prematurely during 先機 animation (f_idx={f_idx})"
+            assert base_set_before is False, f"Baseline polluted during 先機 animation (f_idx={f_idx})"
 
     assert mgr.battle_has_started is True
-    assert mgr.parser.is_opp_baseline_set is True and mgr.parser.is_my_baseline_set is True
-
-    # Baseline for Enemy Slot 5 (leftmost, 0.25w) and Slot 1 (0.55w) MUST match landed coords, NOT +190px swoop!
-    assert abs(mgr.parser.baseline_opp["Slot 5"][0] - (w * 0.25)) <= 4.0
-    assert abs(mgr.parser.baseline_opp["Slot 1"][0] - (w * 0.55)) <= 4.0
-    # Even when Slot 1 is occluded on Frame 5+, affine prediction holds exact landed x=0.55w!
-    latest_opp = overlay_snapshots[-1]
-    assert latest_opp["Slot 1"]["alive"] is True
-    assert abs(latest_opp["Slot 1"]["pos"][0] - (w * 0.55)) <= 5.0
-
-    # 3. Switching Red -> Green clears SpatialTracker baselines cleanly while keeping locked draft templates
-    assert ctrl.set_mode("green") is True
-    while ctrl.is_busy:
-        time.sleep(0.01)
-    assert mgr.battle_has_started is False
-    assert mgr.parser.is_opp_baseline_set is False and mgr.parser.baseline_opp == {}
-    assert mgr.action_bar_detector.has_locked_templates is True
+    assert mgr.has_calibrated_on_my_turn is True
+    assert mgr.is_provisional_baseline is False
+    assert len(mgr.parser.baseline_opp) == 5
+    assert abs(mgr.parser.baseline_opp["Slot 5"][0] - (w * 0.25)) <= 2.0
+    assert abs(mgr.parser.baseline_opp["Slot 1"][0] - (w * 0.55)) <= 2.0
+    assert abs(mgr.parser.baseline_opp["Slot 4"][0] - (w * 0.65)) <= 2.0
+    assert abs(overlay_snapshots[-1]["Slot 1"]["pos"][0] - (w * 0.55)) <= 3.0
 
     mgr.reset_for_next_match()
 
 
-def test_settled_gate_stealth_fallback_prevents_deadlock() -> None:
-    """Verifies anti-deadlock fallback (`>= 4.5s`) when only one camp is visible on a settled screen."""
-    mgr = AITacticalManager()
-    w = 1280
-    only_my = [(w * 0.315, 450.0), (w * 0.495, 460.0)]
+def test_enemy_first_provisional_entry_forces_hard_recalibration_on_first_my_turn_and_drift_self_heal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scenario 2: When the enemy acts first (`is_my_turn=False` past opening buffer), provisional
+    tracking starts, AND on the FIRST ally turn (`is_my_turn=True`) `parser.reset_baseline()` is
+    forced automatically—plus subsequent `is_my_turn` 5-enemy drift self-check heals stale baselines.
+    """
+    _, dict_map, multi_shorts, tags_db = get_public_demo_bundle()
+    repo = ShikigamiRepository(tags_db=tags_db, full_to_short_map=dict_map, multi_char_shorts=multi_shorts)
+    mgr = AITacticalManager(repository=repo)
+    mgr.POLL_MY_TURN = 0.015
+    mgr.POLL_OPP_TURN = 0.015
+    mgr.POLL_ENTRY_SETTLE = 0.015
+    mgr.DRAFT_FADE_GRACE_SEC = 0.01
+    mgr.PROVISIONAL_OPENING_DELAY_SEC = 0.05  # Compressed 3.5s enemy-first buffer for fast deterministic test
 
-    # Frame 1 & Frame 2 at t=1.0s, 1.3s (< 4.5s fallback): single-camp only -> waits for enemy camp
-    assert mgr._check_battlefield_settled([], only_my, is_my_turn=False, screen_w=w, now=1.0) is False
-    assert mgr._check_battlefield_settled([], only_my, is_my_turn=False, screen_w=w, now=1.3) is False
+    monkeypatch.setattr(mgr.models, "warmup_in_background", lambda: None)
+    monkeypatch.setattr(mgr.models, "ensure_loaded", lambda should_abort_fn=None: True)
+    monkeypatch.setattr(mgr.models, "has_active_gpu_llm", lambda: False)
+    monkeypatch.setattr(coord_mod.ctypes.windll.user32, "IsIconic", lambda _h: 0)
+    monkeypatch.setattr(mgr, "_resolve_battle_hwnd", staticmethod(lambda _c, _p: 7777))
+    mgr.turn_detector.ACTIVATION_THRESHOLD = 0.01
 
-    # Once >= 4.5s has elapsed since first unit seen (t=5.6s) and frames remain motion-settled -> enters!
-    assert mgr._check_battlefield_settled([], only_my, is_my_turn=False, screen_w=w, now=5.6) is True
+    w, h = 1280, 720
+    draft_frame, active_turn_frame = _build_draft_and_combat_frames(mgr.turn_detector, mgr.action_bar_detector, w, h)
+    enemy_turn_frame = np.full((h, w, 3), 20, dtype=np.uint8)
+
+    skewed_enemy_turn_opp = [(w * r + 150.0, h * 0.27) for r in (0.25, 0.35, 0.45, 0.55, 0.65)]
+    canonical_opp = [(w * r, h * 0.31) for r in (0.25, 0.35, 0.45, 0.55, 0.65)]
+    canonical_my = [(w * r, h * 0.63) for r in (0.130, 0.315, 0.495, 0.665, 0.835)]
+
+    phase = ["enemy_first"]
+
+    class _CaptureStub:
+        def find_windows(self) -> list[Any]:
+            return []
+
+        def capture_frame(self, hwnd: int, need_gray: bool = False, window_title: str = "") -> CaptureFrame:
+            bgr = enemy_turn_frame if phase[0] == "enemy_first" else active_turn_frame
+            return CaptureFrame(
+                bgr=bgr,
+                gray=None,
+                hwnd=hwnd,
+                window_title=window_title,
+                crop=CropOffset(x0=0, y0=0, client_w=w, client_h=h),
+            )
+
+    monkeypatch.setattr(coord_mod, "CaptureEngine", _CaptureStub)
+
+    def _scripted_yolo(_img: np.ndarray) -> list[_FakeYoloResult]:
+        opp_src = skewed_enemy_turn_opp if phase[0] == "enemy_first" else canonical_opp
+        boxes = [_FakeBox(0, x, y) for x, y in opp_src] + [_FakeBox(1, x, y) for x, y in canonical_my]
+        return [_FakeYoloResult(boxes)]
+
+    monkeypatch.setattr(mgr.models, "predict_yolo", _scripted_yolo)
+    monkeypatch.setattr(mgr.presenter, "ensure_windows", lambda **_kw: None)
+
+    my_picks = ["葛", "帝", "骷", "閻", "連"]
+    opp_picks = ["玲", "SP桃", "葛", "酒吞", "季"]
+    ctrl = ModeController(mgr)
+    ui_stub = _MainUIStub()
+    ctrl.set_ui_app(ui_stub)
+    ctrl.set_mode("yellow")
+    while ctrl.is_busy:
+        time.sleep(0.01)
+
+    ctrl.save_and_handle_five_picks(ui_stub.root, my_picks, opp_picks, draft_frame, 7777)  # type: ignore[arg-type]
+
+    # 1. Wait for provisional enemy-first entry (has_calibrated_on_my_turn == False, skewed +150 px)
+    deadline = time.time() + 1.5
+    while not mgr.battle_has_started and time.time() < deadline:
+        time.sleep(0.015)
+    assert mgr.battle_has_started is True
+    assert mgr.is_provisional_baseline is True
+    assert mgr.has_calibrated_on_my_turn is False
+    assert abs(mgr.parser.baseline_opp["Slot 5"][0] - (w * 0.25 + 150.0)) <= 2.0
+
+    # 2. Switch to our first skill-bar turn (`is_my_turn=True`) -> MUST force `reset_baseline()` to canonical!
+    phase[0] = "my_first_turn"
+    deadline = time.time() + 1.5
+    while not mgr.has_calibrated_on_my_turn and time.time() < deadline:
+        time.sleep(0.015)
+    time.sleep(0.04)  # Let parse_frame complete on the calibrated frame
+
+    assert mgr.has_calibrated_on_my_turn is True
+    assert mgr.is_provisional_baseline is False
+    assert abs(mgr.parser.baseline_opp["Slot 5"][0] - (w * 0.25)) <= 2.0
+    assert abs(mgr.parser.smooth_pos_opp["Slot 5"][0] - (w * 0.25)) <= 2.0
+
+    # 3. Verify `is_my_turn` 5-enemy zero-drift self-check heals any injected smooth_pos_opp drift
+    for s_key in mgr.parser.smooth_pos_opp:
+        ox, oy = mgr.parser.smooth_pos_opp[s_key]
+        mgr.parser.smooth_pos_opp[s_key] = (ox + 90.0, oy)
+    assert mgr._recalibrate_opp_if_drifted_on_my_turn(canonical_opp, w) is True
+    assert mgr.parser.is_opp_baseline_set is False
+
+    mgr.reset_for_next_match()
