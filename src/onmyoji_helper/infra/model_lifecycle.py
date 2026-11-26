@@ -12,7 +12,6 @@ import time
 from typing import Any
 
 import numpy as np
-from ultralytics import YOLO
 
 from onmyoji_helper.decision.llm_engine import TacticalEngine
 from onmyoji_helper.infra.paths import resolve_asset_path
@@ -26,7 +25,7 @@ class ModelLifecycleManager:
     def __init__(self, yolo_filename: str = "best.pt") -> None:
         """Initializes model holders and independent YOLO / LLM locks."""
         self.yolo_filename: str = yolo_filename
-        self.yolo_model: YOLO | None = None
+        self.yolo_model: Any = None
         self.tactical_engine: TacticalEngine | None = None
         self.yolo_imgsz: int = 640
 
@@ -84,6 +83,8 @@ class ModelLifecycleManager:
                     self.yolo_imgsz = 640 if torch.cuda.is_available() else 480
                 except Exception:
                     self.yolo_imgsz = 480
+                from ultralytics import YOLO
+
                 self.yolo_model = YOLO(model_path)
 
         with self.llm_lock:
