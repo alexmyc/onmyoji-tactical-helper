@@ -3,13 +3,14 @@
 *Combining custom YOLOv8n 2D-affine spatial tracking, RapidOCR, rule-based dependency-aware XMind decision trees, and local quantized Gemma-4 LLM inference within a production-oriented 7-layer modular desktop architecture.*
 
 [![CI](https://github.com/alexmyc/onmyoji-tactical-helper/actions/workflows/ci.yml/badge.svg)](https://github.com/alexmyc/onmyoji-tactical-helper/actions/workflows/ci.yml)
-[![Release v1.0.0](https://img.shields.io/badge/Release-v1.0.0-2EA043)](https://github.com/alexmyc/onmyoji-tactical-helper/releases/tag/v1.0.0)
+[![Release v1.0.0](https://img.shields.io/badge/Release-v1.0.0%20Gold%20Master-2EA043?logo=github)](https://github.com/alexmyc/onmyoji-tactical-helper/releases/tag/v1.0.0)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![YOLOv8n](https://img.shields.io/badge/Vision-YOLOv8n%20%2B%202D%20Affine-00B4D8)](docs/model_artifacts/)
 [![Gemma-4 GGUF](https://img.shields.io/badge/Edge%20LLM-Gemma--4%20GGUF-FF6F00)](https://github.com/abetlen/llama-cpp-python)
 [![RapidOCR](https://img.shields.io/badge/OCR-RapidOCR%20DirectML-2ECC71)](https://github.com/RapidAI/RapidOCR)
-[![Mypy & Ruff](https://img.shields.io/badge/QA-Ruff%20%2B%20Mypy%20Checked-D7FF64?logo=ruff&logoColor=black)](pyproject.toml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tests & Coverage](https://img.shields.io/badge/Tests-44%2F44%20Passing%20(82.0%25%20Core%20Cov)-brightgreen)](pyproject.toml)
+[![ISO Standards](https://img.shields.io/badge/Standards-ISO%2FIEC%2025010%20%C2%B7%2027001%20%C2%B7%2029119-0A66C2)](docs/ARCHITECTURE.md#7-engineering-standards-alignment--multi-tier-test-governance)
 
 ---
 
@@ -19,17 +20,16 @@
 
 | Engineering Dimension | Production Implementation & Verifiable Metric |
 | :--- | :--- |
-| **Architecture** | Unidirectional **7-layer modular Python 3.12 package** (`33` modules, Cython 3.3 `.pyd` native compilation) |
+| **Clean Architecture** | Unidirectional **7-layer modular Python 3.12 package** (`33` modules, Cython 3.3 `.pyd` native compilation) |
 | **5v5 Vision & Tracking** | Custom `YOLOv8n` (**`99.5%` peak `mAP@50`**) + 2D partial-affine tracking + **Actionable Turn-UI baseline calibration** |
-| **End-to-End Latency** | **`3.193 ms` P50** (`6.700 ms` P99) single-frame `1280×720` CV + Rule + HUD + `125%` DWM DPI pipeline |
-| **Verification & Governance** | **43 offline unit, E2E & noisy synthetic CV tests** (**`82.0%` core coverage**, `ISO/IEC 25010 · 27001 · 29119` aligned) |
+| **End-to-End Latency** | **`3.19 ms` P50** (`6.70 ms` P99) single-frame `1280×720` CV + Rule + HUD + `125%` DWM DPI pipeline |
+| **Verification & Governance** | **`44/44` offline unit, E2E & noisy synthetic CV tests** (**`82.0%` core coverage**, `ISO/IEC 25010 · 27001 · 29119` aligned) |
 
-> **30-Second Cross-Platform Offline Interactive Demo (Windows & Linux) — No Game, GPU, Weights, or `.env` Required:**
-> ```bash
-> pip install numpy opencv-python
-> python run_app.py --demo
-> ```
-> Launches **three synchronized GUI windows** (*Interactive Match Sandbox*, *Live Draft & Mode View*, and *AI Tactical Advisor*) powered by the real production engines and built-in bilingual dataset (`27` aliases, `13` unit profiles, `2` playbooks). Step through Ban/Pick counter-chains, dead-branch pivots, mirror-match alerts, or click **Green / Yellow / Red** modes directly to inspect live engine telemetry.
+> **Recruiter 10-Second Evaluation — Zero-Install Windows Portable Demo (`v1.0.0`):**
+> 1. **Windows 10/11 (Fastest — Zero Setup)**: Download [**`OnmyojiHelper_HR_Demo_Win64.zip`**](https://github.com/alexmyc/onmyoji-tactical-helper/releases/latest/download/OnmyojiHelper_HR_Demo_Win64.zip) from [GitHub Releases (`v1.0.0`)](https://github.com/alexmyc/onmyoji-tactical-helper/releases/tag/v1.0.0), unzip, and double-click **`OnmyojiHelper.exe`**—no Python, game client, GPU, `.env`, or UAC elevation required.
+> 2. **Cross-Platform Source Sandbox (Windows & Linux)**: Run `pip install numpy opencv-python && python run_app.py --demo`.
+>
+> Both options launch **three synchronized GUI windows** (*Interactive Match Sandbox*, *Live Draft & Mode View*, and *AI Tactical Advisor*) powered by the real production engines and built-in bilingual dataset (`27` aliases, `13` unit profiles, `2` playbooks). Step through Ban/Pick counter-chains, dead-branch pivots, mirror-match alerts, or toggle **Green / Yellow / Red** modes directly to inspect live engine telemetry.
 
 ---
 
@@ -62,7 +62,7 @@
 
 - **Dual-Track Data Isolation & Credential-Free Default Packaging**
   - **Public Sandbox vs. Private Cloud Sync**: Public Sandbox Mode (`--demo` or default when `.env` is absent) bundles **27 curated sample aliases, 13 shikigami combat profiles, and 2 sample playbooks** (`public_demo_data.py`) for instant zero-config evaluation; configuring an untracked local `.env` dynamically syncs the full **1,128-entry alias dictionary and 251 shikigami tag profiles** from external Google Sheets.
-  - **Native Binary Compilation (4 Standalone Release Profiles)**: `build_release.py` and `build_release.bat` provide a pure-ASCII 4-edition packager (`personal`, `hr-demo`, `friend-full`, `friend-lite`) compiling all **33 layered package modules** into native Windows `.pyd` C-extensions via **Cython 3.3 + MSVC** (`/O2 /DNDEBUG`, `/DEBUG:NONE`). Default / `hr-demo` builds remain 100% credential-free and produce a zero-argument `OnmyojiHelper_HR_Demo_Win64.zip` archive.
+  - **Native Binary Compilation (4 Standalone Release Profiles)**: `build_release.py` and `build_release.bat` provide a pure-ASCII 4-edition packager (`personal`, `hr-demo`, `friend-full`, `friend-lite`) compiling all **33 layered package modules** into native Windows `.pyd` C-extensions via **Cython 3.3 + MSVC** (`/O2 /DNDEBUG`, `/DEBUG:NONE`), explicitly bundling `.pyd`-hidden native libraries (`pywin32` / `pywintypes312.dll`, ONNX/CUDA runtimes per profile) and executing a live post-build **`OnmyojiHelper.exe --smoke-check`** verification gate before generating `OnmyojiHelper_HR_Demo_Win64.zip`.
 
 ---
 
@@ -184,10 +184,16 @@ This repository aligns its design, credential boundaries, and automated verifica
 
 ---
 
-## Quick Start
+## Recruiter Quickstart & Build Guide
 
-### 1. Instant Offline Interactive Demo (Recommended for Reviewers — Windows & Linux)
-No game installation, external model weights, UAC elevation, or `.env` configuration required:
+### 1. Option A (Fastest — Zero-Install Windows 64-bit Portable Release)
+Designed for Hiring Managers and technical reviewers on Windows 10/11 who want instant interactive evaluation with **zero Python setup, zero game client, zero model weights, zero `.env`, and zero UAC prompt**:
+1. Download [**`OnmyojiHelper_HR_Demo_Win64.zip`**](https://github.com/alexmyc/onmyoji-tactical-helper/releases/latest/download/OnmyojiHelper_HR_Demo_Win64.zip) directly from [GitHub Releases (`v1.0.0`)](https://github.com/alexmyc/onmyoji-tactical-helper/releases/tag/v1.0.0).
+2. Extract the archive and double-click **`OnmyojiHelper.exe`**.
+3. The executable detects `data/demo_default.flag` and immediately opens the **Main Draft & Mode Window**, **AI Tactical Advisor**, and **Interactive Match Sandbox** side-by-side (`Offline Demo` dataset: `27` bilingual aliases, `13` combat profiles, `2` playbooks). Step through all 4 PvP scenarios, switch playbooks, or click **Green / Yellow / Red** modes on either window to inspect real-time engine decisions.
+
+### 2. Option B (Cross-Platform Source Sandbox — Windows & Linux)
+Run directly from source on Windows or Linux with no game window, GPU, external weights, or `.env`:
 ```bash
 # Minimal cross-platform install for the offline interactive sandbox:
 pip install numpy opencv-python
@@ -197,10 +203,9 @@ pip install -r requirements.txt
 
 python run_app.py --demo
 ```
-Opens the **Draft & Mode Window**, **AI Tactical Panel**, and **Interactive Match Sandbox** side-by-side using the built-in bilingual Public Sandbox dataset (`27` sample aliases, `13` combat profiles, `2` playbooks). Step through all 4 engineering scenarios, switch playbooks, or click **Green / Yellow / Red** modes on either window to inspect real-time engine decisions.
 
-### 2. Run QA Gate (Tests, Coverage Transparency, Mypy, Ruff & Benchmarks)
-Install QA/development tools from `requirements-dev.txt` and run all **43** offline tests:
+### 3. Run QA Gate (`44/44` Tests, Coverage Transparency, Mypy, Ruff & Benchmarks)
+Install QA/development tools from `requirements-dev.txt` and run all **44** offline tests:
 ```powershell
 pip install -r requirements-dev.txt
 pytest -v --cov=onmyoji_helper --cov-report=term-missing --cov-fail-under=70
@@ -208,33 +213,35 @@ mypy src
 ruff check src tests scripts run_app.py build_release.py
 python scripts/run_benchmarks.py
 ```
-- **Coverage Scope Transparency**: Headless CI enforces **`>= 70%`** coverage across the decoupled core decision, vision, domain, automation, and sync-parser layers (currently **`82.0%`** across `2,233` statements). Full-repository line coverage—when counting interactive Tkinter GUI windows, Win32 GDI/SendInput syscalls, and CUDA/GGUF model loaders (`4,870` total statements)—stands at **`61.2%`**.
+- **Coverage Scope Transparency**: Headless CI enforces **`>= 70%`** coverage across the decoupled core decision, vision, domain, automation, and sync-parser layers (currently **`82.0%`** across `2,233` statements). Full-repository line coverage—when counting interactive Tkinter GUI windows, Win32 GDI/SendInput syscalls, and CUDA/GGUF model loaders—stands at **`61.2%`**.
 
-### 3. Live HUD Execution & Optional Private Cloud Sync (`.env`)
+### 4. Live HUD Execution & Optional Private Cloud Sync (`.env`)
 - **Public Sandbox Mode (Default)**: Launching `python run_app.py` without `.env` loads the built-in sample dataset (`public_demo_data.py`: `27` aliases, `13` tags, `2` playbooks).
 - **Private Cloud Mode**: Copy `.env.example` to `.env` (git-ignored) and configure your Google Sheets IDs (`1,128` aliases / `251` unit tags) and license CSV URL. Launching `start.bat` or `python run_app.py` requests Windows UAC elevation (for inspecting elevated DirectX windows under Windows UIPI) and syncs your live tables.
 
-### 4. Multi-Edition Native Binary Compilation (`build_release.bat` / `build_release.py`)
-Install build dependencies (`Cython` and `PyInstaller`) via `requirements-dev.txt`, then launch the interactive 4-option pure-ASCII menu (`build_release.bat`) or invoke `--profile` directly:
+### 5. Multi-Edition Native Binary Compilation — 4 Standalone Profiles (`build_release.bat` / `build_release.py`)
+`build_release.py` compiles all `33` package modules into native Cython `3.3` `.pyd` binaries across four isolated distribution profiles:
+
+| Profile (`--profile`) | Output Artifact | Credentials & Privilege Policy | Bundled AI / Runtime Tier |
+| :--- | :--- | :--- | :--- |
+| **`personal`** (`[1]`) | `dist/OnmyojiHelper_Personal/` | Local `.env` + UAC Admin | `YOLOv8n` (`best.pt`) + `RapidOCR` + Local `.gguf` |
+| **`hr-demo`** (`[2]`) | `dist/OnmyojiHelper_HR_Demo/` + **`OnmyojiHelper_HR_Demo_Win64.zip`** | **Zero `.env`** (`.env.example` only) · **No UAC** · `demo_default.flag` | Lightweight Offline Demo (`pywin32` + OpenCV + Symbolic Engine) |
+| **`friend-full`** (`[3]`) | `dist/OnmyojiHelper_Friend_Full/` | Hardware Whitelist `.env` + `WARNING` log + UAC Admin | `YOLOv8n` + `RapidOCR` + Bundled `data/models/*.gguf` (CUDA) |
+| **`friend-lite`** (`[4]`) | `dist/OnmyojiHelper_Friend_Lite/` | Hardware Whitelist `.env` + `WARNING` log + UAC Admin | `YOLOv8n` + `RapidOCR` + `FORCE_LITE_ENGINE=1` (0-VRAM Rule Tier) |
+
 ```powershell
 pip install -r requirements.txt -r requirements-dev.txt
 
-# [1] Personal Full Edition -> dist\OnmyojiHelper_Personal\ (33 .pyd + local .env + best.pt + GGUF)
-python build_release.py --profile personal --workers 2
+# Interactive 4-option pure-ASCII builder menu:
+build_release.bat
 
-# [2] HR / Recruiter Demo Edition -> dist\OnmyojiHelper_HR_Demo\ + dist\OnmyojiHelper_HR_Demo_Win64.zip
-#     (Zero credentials, no UAC prompt, writes data\demo_default.flag for zero-arg Offline Demo launch)
+# Or build a specific profile non-interactively:
 python build_release.py --profile hr-demo --workers 2
-
-# [3] Friend Full Edition (GPU / CUDA) -> dist\OnmyojiHelper_Friend_Full\
-#     (Hardened .pyd + WARNING log + whitelist .env + auto-bundled data\models\*.gguf)
+python build_release.py --profile personal --workers 2
 python build_release.py --profile friend-full --workers 2
-
-# [4] Friend Lite Edition (Low-Spec / No CUDA) -> dist\OnmyojiHelper_Friend_Lite\
-#     (Hardened .pyd + whitelist .env + excludes llama_cpp + injects FORCE_LITE_ENGINE=1)
 python build_release.py --profile friend-lite --workers 2
 ```
-Every edition undergoes an automated post-build audit verifying clean root layout (`['OnmyojiHelper.exe', 'data']`), `33/33` compiled `.pyd` binaries, **zero `.py` source residue**, and strict credential-free isolation on `hr-demo` builds.
+Every build executes an automated 6-step post-build audit verifying clean root layout (`['OnmyojiHelper.exe', 'data']`), `33/33` compiled `.pyd` binaries, **zero `.py` source residue**, bundled `win32gui.pyd` / `pywintypes*.dll` integrity, strict credential-free isolation on `hr-demo`, and a live **`OnmyojiHelper.exe --smoke-check`** zero-crash startup check before `.zip` creation.
 
 ---
 
@@ -267,7 +274,7 @@ onmyoji-tactical-helper/
 │       ├── infra/                     # EnvLoader, Win32 APIs, BitBlt, XOR cache sync & VRAM guard
 │       ├── ui/                        # MainWindow, AITacticalUI, BattleOverlayUI & DemoSandbox
 │       └── app/                       # Runtime bootstrap, ModeController & BattleCoordinator
-├── tests/                             # Offline unit, E2E & noisy synthetic CV suite (43 tests)
+├── tests/                             # Offline unit, E2E & noisy synthetic CV suite (44 tests)
 └── .github/workflows/ci.yml           # GitHub Actions CI (Ruff + Mypy + Pytest >=70% Core Coverage)
 ```
 
