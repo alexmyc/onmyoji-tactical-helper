@@ -1,9 +1,9 @@
 """5v5 Real-Time Battle Coordinator for Onmyoji Tactical Helper.
 
 Orchestrates screen capture, YOLOv8 spatial tracking, turn/skill geometric detection,
-asynchronous Gemma-4 reasoning, instant click-through HUD presentation, and Red Mode
-skill-first auto-execution (with `1.0 ~ 1.5s` post-decision camera-settle buffer and
-`1.2 ~ 1.8s` unfinished-turn retry loop) under RLock-protected thread-safe session state.
+draft-avatar vs. action-bar template matching (`ActionBarDetector`), asynchronous Gemma-4
+reasoning, click-through HUD presentation, and Red Mode skill-first auto-execution under
+RLock-protected thread-safe session state.
 """
 
 import ctypes
@@ -14,6 +14,7 @@ import time
 import tkinter as tk
 from typing import Any
 
+import numpy as np
 import win32gui
 
 from onmyoji_helper.automation.battle_executor import AutoBattleExecutor
@@ -36,6 +37,7 @@ class AITacticalManager:
     POLL_MY_TURN: float = 0.20
     POLL_OPP_TURN: float = 0.35
     POST_DECISION_BUFFER_RANGE: tuple[float, float] = (1.0, 1.5)
+    DRAFT_FADE_GRACE_SEC: float = 2.5
 
     def __init__(self, repository: ShikigamiRepository | None = None) -> None:
         self.models: ModelLifecycleManager = ModelLifecycleManager()
@@ -76,10 +78,10 @@ class AITacticalManager:
         self.my_slot_map: dict[str, str] = {}
         self.last_turn_key: tuple[bool, str | None] | None = None
 
-        # Non-blocking 1.0~1.5s post-decision settle state (keeps HUD refreshing smoothly while waiting)
         self._decision_ready_ts: float = 0.0
         self._turn_settle_delay: float = 1.2
         self._llm_override_slot: str | None = None
+        self._llm_override_skill: str | None = None
 
     def set_repository(self, repository: ShikigamiRepository) -> None:
         """Injects the shared `ShikigamiRepository` initialized at startup."""
@@ -98,8 +100,29 @@ class AITacticalManager:
         self._wake_event.set()
 
     def hide_battle_windows(self) -> None:
-        """Hides and destroys floating tactical/HUD windows when outside an active 5v5 battle."""
+        """Hides and destroys floating tactical/HUD windows when outside an active battle."""
         self.presenter.destroy_all(self.root_window)
+
+    def capture_draft_templates(
+        self,
+        draft_frame: np.ndarray | None,
+        my_draft: list[str],
+    ) -> bool:
+        """Captures and locks the 5 ally portrait templates on the 5-pick draft screen."""
+        if draft_frame is None or len(my_draft) != 5:
+            return False
+        with self.models.yolo_lock:
+            self.action_bar_detector.reset()
+            ok = self.action_bar_detector.capture_prep_templates(
+                draft_frame,
+                our_picks=my_draft,
+                lock_on_success=True,
+            )
+            if ok:
+                logger.info(
+                    f"📸 [ActionBar] 已於 5 手翻牌階段擷取並鎖定我方頭像模板: {self.action_bar_detector.slot_to_shiki}"
+                )
+            return ok
 
     def update_live_draft(self, my_draft: list[str], opp_draft: list[str]) -> None:
         """Updates 5v5 draft names in-place under `_state_lock`."""
@@ -107,6 +130,8 @@ class AITacticalManager:
             self.my_draft_live = list(my_draft)
             self.opp_draft_live = list(opp_draft)
             self.my_slot_map = {f"Slot {i + 1}": name for i, name in enumerate(my_draft)}
+        with self.models.yolo_lock:
+            self.action_bar_detector.bind_picks(my_draft)
         self.wake_loop()
 
     def enable_mode(self, mode_name: str, has_locked_draft: bool = True) -> None:
@@ -171,7 +196,7 @@ class AITacticalManager:
             self.mode_controller.emergency_downgrade_to_yellow(reason)
 
     def close_ui_sync(self, unload_models: bool = False) -> None:
-        """Synchronously halts active battle threads and destroys floating UIs (keeping models warm by default)."""
+        """Synchronously halts active battle threads and destroys floating UIs (keeping models warm AND preserving locked match templates!)."""
         self.auto_battle_enabled = False
         self.auto_executor.stop_immediately()
         self.wake_loop()
@@ -209,7 +234,7 @@ class AITacticalManager:
             self.close_ui()
 
     def reset_to_blank(self, root_window: tk.Tk | None) -> None:
-        """Resets battle session state and immediately hides/closes HUD & advice panels on match end."""
+        """Resets battle session state and closes HUD & advice panels on match end."""
         self.stop_requested = True
         self.battle_has_started = False
         self.no_box_start_time = 0.0
@@ -225,6 +250,7 @@ class AITacticalManager:
             self.last_turn_key = None
             self._decision_ready_ts = 0.0
             self._llm_override_slot = None
+            self._llm_override_skill = None
 
         with self.models.yolo_lock:
             self.action_bar_detector.reset()
@@ -236,7 +262,7 @@ class AITacticalManager:
         self.models.purge_cuda_cache()
 
     def reset_for_next_match(self) -> None:
-        """Hides floating windows and prepares coordinator cleanly for a fresh match session."""
+        """Hides floating windows and clears templates/baselines cleanly for a fresh match."""
         with self.session_lock, self._state_lock:
             self.stop_requested = True
             self.is_active_session = False
@@ -249,6 +275,7 @@ class AITacticalManager:
             self.last_turn_key = None
             self._decision_ready_ts = 0.0
             self._llm_override_slot = None
+            self._llm_override_skill = None
             self.user_closed = False
         self.auto_executor.stop_immediately()
         self.presenter.destroy_all(self.root_window)
@@ -264,7 +291,7 @@ class AITacticalManager:
             self.turn_detector.reset_cache()
 
     def _async_llm_reasoning(self, payload: dict[str, Any], turn_key: tuple[bool, str | None]) -> None:
-        """Runs Gemma-4 / rule reasoning asynchronously and marks post-decision buffer ready."""
+        """Runs Gemma-4 / rule reasoning asynchronously and updates chosen skill + target slot."""
         try:
             if self._is_cancelled():
                 return
@@ -276,6 +303,7 @@ class AITacticalManager:
             mode_desc = str(advice_dict.get("mode", ""))
             mode_tag = f" [{mode_desc}]" if mode_desc else ""
             llm_slot = advice_dict.get("target_slot")
+            llm_skill = advice_dict.get("chosen_skill")
 
             with self._state_lock:
                 slot_map_snapshot = dict(self.my_slot_map)
@@ -300,6 +328,8 @@ class AITacticalManager:
                     self.latest_advice_text = final_text
                     if isinstance(llm_slot, str) and llm_slot.startswith("Slot "):
                         self._llm_override_slot = llm_slot
+                    if isinstance(llm_skill, str) and llm_skill.upper() in ("S1", "S2", "S3", "S4"):
+                        self._llm_override_skill = llm_skill.upper()
                     if turn_key[0] and self._decision_ready_ts == 0.0:
                         self._decision_ready_ts = time.time()
             self.wake_loop()
@@ -339,6 +369,7 @@ class AITacticalManager:
         my_draft: list[str],
         opp_draft: list[str],
         preferred_hwnd: int | None = None,
+        from_five_picks_lock: bool = False,
     ) -> None:
         clicker = CaptureEngine()
         with self._state_lock:
@@ -348,10 +379,9 @@ class AITacticalManager:
             self.last_turn_key = None
             self._decision_ready_ts = 0.0
             self._llm_override_slot = None
+            self._llm_override_skill = None
 
         try:
-            # Strict Battle Lifecycle Gate: keep AITacticalUI & BattleOverlayUI HIDDEN until
-            # 5v5 arena combat entry is confirmed below (`battle_has_started == True`)!
             self.model_ready_event.clear()
             if not self.models.ensure_loaded(should_abort_fn=lambda: self.stop_requested or self.user_closed):
                 self.is_active_session = False
@@ -397,8 +427,15 @@ class AITacticalManager:
                 if self._is_cancelled():
                     break
 
-                if not self.battle_has_started and len(self.action_bar_detector.prep_templates) < 5:
-                    self.action_bar_detector.capture_prep_templates(screen_color, our_picks=cur_my_draft)
+                # Fallback template capture ONLY if not already locked at 5-pick flip and still on draft screen
+                if not self.battle_has_started and not self.action_bar_detector.has_locked_templates:
+                    if (time.time() - self.session_start_time) <= 3.0 and not is_my_turn:
+                        if self.action_bar_detector.capture_prep_templates(
+                            screen_color, our_picks=cur_my_draft, lock_on_success=True
+                        ):
+                            logger.info(
+                                f"📸 [ActionBar] 已擷取並鎖定我方 5 隻式神頭像模板: {self.action_bar_detector.slot_to_shiki}"
+                            )
 
                 results = self.models.predict_yolo(screen_color)
                 if results is None or self._is_cancelled():
@@ -418,90 +455,16 @@ class AITacticalManager:
 
                 current_time = time.time()
 
-                # Pre-battle gate: never run StateParser or pop HUD/AI windows on Ban/Pick or VS banners!
-                if not self.battle_has_started:
-                    arena_opp = sum(
-                        1
-                        for b in boxes_data
-                        if b["cls"] == 0
-                        and (screen_w * 0.25) <= b["cx"] <= (screen_w * 0.93)
-                        and (screen_h * 0.06) <= b["cy"] <= (screen_h * 0.62)
-                    )
-                    arena_my = sum(
-                        1
-                        for b in boxes_data
-                        if b["cls"] == 1
-                        and b["cx"] < (screen_w * 0.87)
-                        and b["cy"] > (screen_h * 0.40)
-                    )
-                    both_sides_present = (
-                        arena_opp >= 2 and arena_my >= 2 and (arena_opp + arena_my) >= 5
-                    )
-                    if both_sides_present or (is_my_turn and (arena_opp + arena_my) >= 3):
-                        self.consecutive_alive_frames += 1
-                    else:
-                        self.consecutive_alive_frames = 0
-
-                    if self.consecutive_alive_frames >= 2 or (
-                        is_my_turn and (arena_opp + arena_my) >= 3
-                    ):
-                        self.battle_has_started = True
-                        self.no_box_start_time = 0.0
-                        self.parser.reset_baseline()
-                        if self.auto_battle_enabled:
-                            self.auto_executor.reset_for_match()
-                            self.auto_executor.start_kill_switch_monitor(
-                                on_emergency_stop=self._handle_emergency_stop
-                            )
-                            self.auto_executor.is_game_window_foreground(
-                                hwnd, allow_reclaim_from_self=True
-                            )
-                    else:
-                        if (current_time - self.session_start_time) >= 90.0:
-                            logger.info("⏳ [BattleLoop] 等待進入實戰逾時 (90s)，結束本次待機。")
-                            self.reset_to_blank(root_window)
-                            break
-                        self._wake_event.wait(timeout=0.25)
-                        self._wake_event.clear()
-                        continue
-
-                # Ensure floating windows exist once 5v5 battle is confirmed (and on Yellow<->Red toggles)
-                if not windows_ensured or (
-                    self.show_overlay and self.presenter.overlay_ui is None
+                # Brief fade-out guard ONLY right after 5th pick so Ban/Pick card exit doesn't flash early
+                if (
+                    from_five_picks_lock
+                    and not self.battle_has_started
+                    and not is_my_turn
+                    and (current_time - self.session_start_time) < self.DRAFT_FADE_GRACE_SEC
                 ):
-                    self.presenter.ensure_windows(
-                        root_window=root_window,
-                        show_overlay=self.show_overlay,
-                        on_closed_by_user=self.on_ui_closed_by_user,
-                        is_cancelled_fn=self._is_cancelled,
-                    )
-                    windows_ensured = True
-
-                active_slot: str | None = None
-                active_shiki: str = UNKNOWN_SHIKIGAMI
-                if is_my_turn:
-                    res_slot, _, _ = self.action_bar_detector.identify_active_turn(screen_color)
-                    if res_slot:
-                        active_slot = res_slot
-                        with self._state_lock:
-                            active_shiki = self.my_slot_map.get(active_slot, UNKNOWN_SHIKIGAMI)
-
-                current_turn_key = (is_my_turn, active_slot)
-                with self._state_lock:
-                    if current_turn_key != self.last_turn_key:
-                        self.last_turn_key = current_turn_key
-                        self.latest_advice_text = ""
-                        self.last_llm_time = 0.0
-                        self._llm_override_slot = None
-                        if is_my_turn:
-                            self._turn_settle_delay = random.uniform(*self.POST_DECISION_BUFFER_RANGE)
-                            # In 0-VRAM Rule Mode, decision is ready on this exact frame; in GPU LLM mode, wait for LLM completion (bounded below)
-                            self._decision_ready_ts = (
-                                0.0 if self.models.has_active_gpu_llm() else current_time
-                            )
-                        else:
-                            self._decision_ready_ts = 0.0
-                            self.latest_auto_action_text = ""
+                    self._wake_event.wait(timeout=0.25)
+                    self._wake_event.clear()
+                    continue
 
                 my_status, opp_status = self.parser.parse_frame(
                     cur_my_draft, cur_opp_draft, boxes_data, screen_w, screen_height=screen_h
@@ -512,16 +475,90 @@ class AITacticalManager:
                 total_alive = my_alive_count + opp_alive_count
                 current_time = time.time()
 
+                # Immediately show AITacticalUI & BattleOverlayUI as soon as any unit or skill bar appears!
+                if not self.battle_has_started:
+                    if total_alive >= 1 or is_my_turn:
+                        self.battle_has_started = True
+                        self.no_box_start_time = 0.0
+                        if self.auto_battle_enabled:
+                            self.auto_executor.reset_for_match()
+                            self.auto_executor.start_kill_switch_monitor(
+                                on_emergency_stop=self._handle_emergency_stop
+                            )
+                            self.auto_executor.is_game_window_foreground(
+                                hwnd, allow_reclaim_from_self=True
+                            )
+                    else:
+                        if (current_time - self.session_start_time) >= 90.0:
+                            self.reset_to_blank(root_window)
+                            break
+                        self._wake_event.wait(timeout=0.25)
+                        self._wake_event.clear()
+                        continue
+
+                need_ai_win = self.presenter.ai_ui is None or not self.presenter.ai_ui.winfo_exists()
+                need_ov_win = self.show_overlay and (
+                    self.presenter.overlay_ui is None or not self.presenter.overlay_ui.winfo_exists()
+                )
+                if not windows_ensured or need_ai_win or need_ov_win:
+                    self.presenter.ensure_windows(
+                        root_window=root_window,
+                        show_overlay=self.show_overlay,
+                        on_closed_by_user=self.on_ui_closed_by_user,
+                        is_cancelled_fn=self._is_cancelled,
+                    )
+                    windows_ensured = True
+
                 if not logged_battle_entry:
                     logged_battle_entry = True
                     logger.info(
                         f"⚔️ [BattleLoop] 已進入實戰追蹤 | hwnd={hwnd} | 畫面={screen_w}x{screen_h} "
                         f"| 我方存活={my_alive_count} 敵方存活={opp_alive_count} "
+                        f"| 頭像模板={len(self.action_bar_detector.prep_templates)}/5 "
                         f"| overlay={self.show_overlay} auto_red={self.auto_battle_enabled}"
                     )
 
+                active_slot: str | None = None
+                active_shiki: str = UNKNOWN_SHIKIGAMI
+                match_score: float = 0.0
+                if is_my_turn:
+                    res_slot, matched_name, match_score = self.action_bar_detector.identify_active_turn(
+                        screen_color
+                    )
+                    if res_slot:
+                        active_slot = res_slot
+                        with self._state_lock:
+                            active_shiki = self.my_slot_map.get(active_slot, matched_name)
+
+                current_turn_key = (is_my_turn, active_slot)
                 with self._state_lock:
+                    if current_turn_key != self.last_turn_key:
+                        self.last_turn_key = current_turn_key
+                        self.latest_advice_text = ""
+                        self.last_llm_time = 0.0
+                        self._llm_override_slot = None
+                        self._llm_override_skill = None
+                        if is_my_turn:
+                            if active_slot:
+                                logger.info(
+                                    f"🎯 [ActionBar] 行動條頭像比對成功：當前行動式神 = [{active_slot}] {active_shiki} "
+                                    f"(相似度={match_score:.3f})"
+                                )
+                            else:
+                                logger.info(
+                                    f"⚠️ [ActionBar] 行動條頭像未匹配高信心式神 (最高相似度={match_score:.3f}, "
+                                    f"已存模板={len(self.action_bar_detector.prep_templates)}/5)"
+                                )
+                            self._turn_settle_delay = random.uniform(*self.POST_DECISION_BUFFER_RANGE)
+                            self._decision_ready_ts = (
+                                0.0 if self.models.has_active_gpu_llm() else current_time
+                            )
+                        else:
+                            self._decision_ready_ts = 0.0
+                            self.latest_auto_action_text = ""
+
                     locked_llm_slot = self._llm_override_slot
+                    locked_llm_skill = self._llm_override_skill
 
                 payload = self.context_builder.build_payload(
                     my_status,
@@ -538,6 +575,27 @@ class AITacticalManager:
                 target_is_enemy = bool(payload.get("target_is_enemy", True))
                 chosen_skill = str(payload.get("chosen_skill", "S1"))
                 skill_scope = str(payload.get("skill_scope", "敵方單體"))
+
+                # Apply LLM-selected skill override (when valid & available) and align its target scope
+                if is_my_turn and locked_llm_skill and bool(skill_states.get(locked_llm_skill.lower(), False)):
+                    chosen_skill = locked_llm_skill
+                    shiki_skills = payload.get("active_shikigami_skills") or {}
+                    sk_info = shiki_skills.get(chosen_skill, {}) or shiki_skills.get(chosen_skill.lower(), {})
+                    override_scope = str(sk_info.get("scope", "")).strip()
+                    if override_scope:
+                        skill_scope = override_scope
+                        if "全體" in skill_scope or "群" in skill_scope:
+                            is_ally_aoe = any(
+                                kw in skill_scope for kw in ("我方", "友方", "群輔", "治療", "拉條", "回火")
+                            )
+                            target_is_enemy = ("敵方" in skill_scope) or (not is_ally_aoe)
+                        elif skill_scope == "自己":
+                            target_is_enemy = False
+                            rec_slot = active_slot
+                        elif "我方" in skill_scope:
+                            target_is_enemy = False
+                        else:
+                            target_is_enemy = True
 
                 self.auto_executor.observe_turn_state(is_my_turn)
                 skill_mapping_snapshot = dict(self.turn_detector.get_skill_mapping(screen_color))
@@ -561,19 +619,9 @@ class AITacticalManager:
                         is_cancelled_fn=self._is_cancelled,
                     )
 
-                # Only end active battle when ALL units and skill bar are gone (preserves 1v1/2v1 endgames!)
                 if total_alive >= 1 or is_my_turn:
                     self.no_box_start_time = 0.0
-                else:
-                    if self.no_box_start_time == 0.0:
-                        self.no_box_start_time = current_time
-                    elif (current_time - self.no_box_start_time) >= 6.0:
-                        logger.info("🏁 [BattleLoop] 實戰畫面已結束，自動隱藏戰術面板與 HUD。")
-                        self.reset_to_blank(root_window)
-                        break
 
-                if total_alive >= 1 or is_my_turn:
-                    # Populate immediate rule-based advice on Frame 1 before spawning async LLM
                     fallback_msg = str(payload.get("fallback_advice", ""))
                     with self._state_lock:
                         if not self.latest_advice_text:
@@ -622,7 +670,6 @@ class AITacticalManager:
                         attempts_done = self.auto_executor.attempts_in_current_turn
                         settle_elapsed = (current_time - ready_ts) if ready_ts > 0.0 else 0.0
 
-                        # On initial attempt of the turn, wait 1.0~1.5s post-decision while keeping HUD live!
                         if attempts_done == 0 and (ready_ts == 0.0 or settle_elapsed < settle_req):
                             rem = max(0.1, settle_req - settle_elapsed) if ready_ts > 0.0 else settle_req
                             wait_msg = (
@@ -662,6 +709,13 @@ class AITacticalManager:
                                 logger.warning(
                                     f"⚠️ [AutoExecutor] 回合執行異常 (已隔離恢復): {exec_err}", exc_info=True
                                 )
+                else:
+                    if self.no_box_start_time == 0.0:
+                        self.no_box_start_time = current_time
+                    elif (current_time - self.no_box_start_time) >= 8.0:
+                        logger.info("🏁 [BattleLoop] 實戰畫面已結束，自動隱藏戰術面板與 HUD。")
+                        self.reset_to_blank(root_window)
+                        break
 
                 with self._state_lock:
                     auto_txt = self.latest_auto_action_text
@@ -693,6 +747,7 @@ class AITacticalManager:
         screen_color: Any = None,
         hwnd: int = 0,
         sync_wait: bool = False,
+        from_five_picks_lock: bool = False,
     ) -> None:
         current_time = time.time()
         self.root_window = root_window
@@ -717,6 +772,7 @@ class AITacticalManager:
                 self.last_turn_key = None
                 self._decision_ready_ts = 0.0
                 self._llm_override_slot = None
+                self._llm_override_skill = None
 
             if self.auto_battle_enabled:
                 self.auto_executor.reset_for_match()
@@ -725,7 +781,15 @@ class AITacticalManager:
                 self.auto_executor.stop_immediately()
 
             with self.models.yolo_lock:
-                self.action_bar_detector.reset()
+                # CRITICAL: Preserve locked 5-pick draft portrait templates across battle entry & mode toggles!
+                if not self.action_bar_detector.has_locked_templates:
+                    self.action_bar_detector.reset()
+                    if isinstance(screen_color, np.ndarray) and len(my_draft) == 5:
+                        self.action_bar_detector.capture_prep_templates(
+                            screen_color, our_picks=my_draft, lock_on_success=True
+                        )
+                else:
+                    self.action_bar_detector.bind_picks(my_draft)
                 self.parser.reset_baseline()
                 self.turn_detector.reset_cache()
 
@@ -736,7 +800,7 @@ class AITacticalManager:
 
             self.battle_thread = threading.Thread(
                 target=self._battle_loop,
-                args=(root_window, list(my_draft), list(opp_draft), int(hwnd)),
+                args=(root_window, list(my_draft), list(opp_draft), int(hwnd), bool(from_five_picks_lock)),
                 name="BattleCoordinatorLoop",
                 daemon=True,
             )

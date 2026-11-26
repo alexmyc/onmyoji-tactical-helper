@@ -122,7 +122,13 @@ class ModeController:
                         assert saved is not None
                         r_win, my_d, opp_d, saved_hwnd = saved
                         self.tactical_mgr.trigger_analysis(
-                            r_win, my_d, opp_d, None, saved_hwnd, sync_wait=False
+                            r_win,
+                            my_d,
+                            opp_d,
+                            None,
+                            saved_hwnd,
+                            sync_wait=False,
+                            from_five_picks_lock=False,
                         )
         except Exception as exc:
             logger.warning(f"⚠️ [ModeController] 模式切換異常: {exc}")
@@ -200,5 +206,11 @@ class ModeController:
             if hasattr(self.tactical_mgr, "enable_mode"):
                 self.tactical_mgr.enable_mode(mode, has_locked_draft=True)
             self.tactical_mgr.trigger_analysis(
-                root_window, my_draft, opp_draft, screen_color, hwnd, sync_wait=sync_wait
+                root_window,
+                my_draft,
+                opp_draft,
+                screen_color,
+                hwnd,
+                sync_wait=sync_wait,
+                from_five_picks_lock=True,
             )

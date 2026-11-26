@@ -10,52 +10,52 @@
   "benchmarks": {
     "xmind_counter_tree_scoring": {
       "iterations": 2000,
-      "p50_ms": 0.0698,
-      "p95_ms": 0.0747,
-      "p99_ms": 0.0978,
-      "mean_ms": 0.0703
+      "p50_ms": 0.0791,
+      "p95_ms": 0.0881,
+      "p99_ms": 0.1258,
+      "mean_ms": 0.0808
     },
     "shikigami_repo_lru_lookup": {
       "iterations": 5000,
       "p50_ms": 0.0004,
-      "p95_ms": 0.0004,
+      "p95_ms": 0.0005,
       "p99_ms": 0.0005,
       "mean_ms": 0.0004
     },
     "noisy_2d_affine_spatial_tracker": {
       "iterations": 1000,
-      "p50_ms": 0.3198,
-      "p95_ms": 0.3495,
-      "p99_ms": 0.3757,
-      "mean_ms": 0.3202
+      "p50_ms": 0.3354,
+      "p95_ms": 0.4272,
+      "p99_ms": 0.6636,
+      "mean_ms": 0.3498
     },
     "mixed_dpi_coordinate_projection": {
       "iterations": 5000,
-      "p50_ms": 0.003,
-      "p95_ms": 0.0032,
-      "p99_ms": 0.0037,
-      "mean_ms": 0.0031
+      "p50_ms": 0.0034,
+      "p95_ms": 0.0036,
+      "p99_ms": 0.004,
+      "mean_ms": 0.0034
     },
     "draft_roi_motion_diff_gate": {
       "iterations": 2000,
-      "p50_ms": 0.0216,
-      "p95_ms": 0.0228,
-      "p99_ms": 0.0268,
-      "mean_ms": 0.0219
+      "p50_ms": 0.0241,
+      "p95_ms": 0.0255,
+      "p99_ms": 0.0341,
+      "mean_ms": 0.0244
     },
     "turn_detector_sobel_hsv_full_pass": {
       "iterations": 500,
-      "p50_ms": 2.4598,
-      "p95_ms": 2.8037,
-      "p99_ms": 2.9577,
-      "mean_ms": 2.4905
+      "p50_ms": 2.9505,
+      "p95_ms": 4.6584,
+      "p99_ms": 5.7125,
+      "mean_ms": 3.1302
     },
     "e2e_synthetic_frame_to_hud": {
       "iterations": 500,
-      "p50_ms": 2.8442,
-      "p95_ms": 3.2707,
-      "p99_ms": 3.3973,
-      "mean_ms": 2.8888
+      "p50_ms": 3.5345,
+      "p95_ms": 4.3501,
+      "p99_ms": 5.4881,
+      "mean_ms": 3.5534
     }
   }
 }

@@ -188,11 +188,17 @@ def _draft_ocr_worker(
                 continue
 
             if snapshot.just_completed_five_picks:
+                # Wait ~0.45s for the 5th pick's flip animation to settle on the draft screen,
+                # then lock all 5 ally portrait templates (`ActionBarDetector`) regardless of mode!
+                time.sleep(0.45)
+                fresh_cap = clicker.capture_frame(hwnd, need_gray=False, window_title=windows[0].title)
+                draft_bgr = fresh_cap.bgr if fresh_cap is not None else frame.bgr
+                tactical_mgr.capture_draft_templates(draft_bgr, snapshot.my_draft)
                 mode_controller.save_and_handle_five_picks(
                     ui_app.root,
                     snapshot.my_draft,
                     snapshot.opp_draft,
-                    None,
+                    draft_bgr,
                     hwnd,
                 )
 

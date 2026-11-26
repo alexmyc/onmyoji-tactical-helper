@@ -16,6 +16,7 @@ from onmyoji_helper.infra.paths import resolve_asset_path
 logger = logging.getLogger("OnmyojiHelper")
 
 VALID_SLOTS = frozenset({"Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5"})
+VALID_SKILLS = frozenset({"S1", "S2", "S3", "S4"})
 
 
 def evaluate_hardware_tier() -> tuple[str, bool, str]:
@@ -152,29 +153,38 @@ class TacticalEngine:
             return self._rule_based_advice(payload, target_slot, target_name, target_tag)
 
         try:
-            # Compact prompt payload (omit pre-rendered fallback_advice to speed up LLM prefill)
+            default_skill = str(payload.get("chosen_skill", "S1")).upper()
+            avail_map = payload.get("available_skills") or {}
+            shiki_skills = payload.get("active_shikigami_skills") or {}
+
+            # Structured context including acting shikigami, S1..S4 skill definitions, availability, and board state
             compact_payload = {
                 "is_my_turn": payload.get("is_my_turn"),
                 "active_shikigami_slot": payload.get("active_shikigami_slot"),
                 "active_shikigami_name": payload.get("active_shikigami_name"),
                 "active_shikigami_operation": payload.get("active_shikigami_operation"),
-                "chosen_skill": payload.get("chosen_skill"),
+                "active_shikigami_skills": shiki_skills,
+                "chosen_skill": default_skill,
                 "skill_scope": payload.get("skill_scope"),
-                "available_skills": payload.get("available_skills"),
+                "available_skills": avail_map,
+                "my_player_team": payload.get("my_player_team"),
                 "enemy_target": payload.get("enemy_target"),
                 "opp_alive_units": payload.get("opp_alive_units"),
             }
 
             system_instruction = (
-                "你是《陰陽師》頂級戰術指揮官。你的任務是指導「我方玩家」進行精準操作。\n\n"
+                "你是《陰陽師》頂級戰術指揮官。你的任務是根據「當前行動式神」(active_shikigami_name)、"
+                "「可用技能」(available_skills) 與「敵我場上陣容」，決定最佳施放技能與目標。\n\n"
                 "【最高原則】：\n"
-                "1. 必須嚴格遵照當前行動式神的【連招建議】(active_shikigami_operation) 與【技能範疇】(skill_scope)。\n"
-                "2. 若技能範疇為「我方單體」，目標必須為我方單位；若為「敵方單體」，目標為敵方單位。絕對不可混淆！\n"
-                "3. 術語白名單：僅限使用 [S1普攻]、[S2技能]、[S3大招]、[S4技能]。絕對禁止出現「奧義」、「必殺技」！\n"
-                "4. 我方回合 (is_my_turn == True)：結構必須為：[當前行動者/技能] + [目標位置與名字] + [精練對策/連招提示]。控制在 35 字以內。\n"
-                "5. 敵方回合 (is_my_turn == False)：簡述敵方核心威脅與對策。\n\n"
+                "1. 必須嚴格遵照當前行動式神的【連招建議】(active_shikigami_operation) 與【技能範疇】(active_shikigami_skills)。\n"
+                "2. chosen_skill 只能從 available_skills 為 true 且非被動的技能中選擇（S1/S2/S3/S4）。\n"
+                "3. 若技能範疇為「我方單體」，目標必須為我方單位；若為「敵方單體」，目標為敵方單位。絕對不可混淆！\n"
+                "4. 術語白名單：僅限使用 [S1普攻]、[S2技能]、[S3大招]、[S4技能]。絕對禁止出現「奧義」、「必殺技」！\n"
+                "5. 我方回合 (is_my_turn == True)：結構必須為：[當前行動者/技能] + [目標位置與名字] + [精練對策/連招提示]。控制在 35 字以內。\n"
+                "6. 敵方回合 (is_my_turn == False)：簡述敵方核心威脅與對策。\n\n"
                 "【輸出 JSON 格式】：\n"
                 "{\n"
+                f'  "chosen_skill": "{default_skill}",\n'
                 f'  "target_slot": "{target_slot}",\n'
                 '  "advice": "戰術提示 (35字以內)"\n'
                 "}"
@@ -193,6 +203,7 @@ class TacticalEngine:
             raw_text = response["choices"][0]["message"]["content"].strip()
 
             parsed_slot = target_slot
+            parsed_skill = default_skill
             clean_advice = ""
             start_idx = raw_text.find("{")
             end_idx = raw_text.rfind("}") + 1
@@ -201,6 +212,12 @@ class TacticalEngine:
                 candidate_slot = res_json.get("target_slot", target_slot)
                 if candidate_slot in VALID_SLOTS or candidate_slot is None:
                     parsed_slot = candidate_slot
+                cand_skill = str(res_json.get("chosen_skill", default_skill)).strip().upper()
+                if cand_skill in VALID_SKILLS and bool(avail_map.get(cand_skill.lower(), False)):
+                    sk_meta = shiki_skills.get(cand_skill, {}) or shiki_skills.get(cand_skill.lower(), {})
+                    sk_scope = str(sk_meta.get("scope", ""))
+                    if cand_skill == "S1" or not any(p in sk_scope for p in ("被動", "無")):
+                        parsed_skill = cand_skill
                 clean_advice = str(res_json.get("advice", "")).strip()
 
             junk_keywords = (
@@ -225,6 +242,7 @@ class TacticalEngine:
 
             return {
                 "mode": f"Gemma-4 ({self.device_mode})",
+                "chosen_skill": parsed_skill,
                 "target_slot": parsed_slot,
                 "target_name": target_name,
                 "target_tag": target_tag,
@@ -286,6 +304,7 @@ class TacticalEngine:
     ) -> dict[str, Any]:
         return {
             "mode": self.device_mode,
+            "chosen_skill": str(payload.get("chosen_skill", "S1")).upper(),
             "target_slot": target_slot,
             "target_name": target_name,
             "target_tag": target_tag,

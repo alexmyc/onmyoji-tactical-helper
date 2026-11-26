@@ -1,10 +1,9 @@
 """Action Bar Avatar Detector Module for Onmyoji Tactical Helper.
 
-Captures contrast-validated avatar fingerprint templates during the match preparation phase
-and identifies the active acting shikigami on the bottom-right turn indicator via normalized
-template matching (`cv2.TM_CCOEFF_NORMED`).
+Captures contrast-validated avatar fingerprint templates during the 5-pick draft reveal /
+match preparation phase and identifies the active acting shikigami on the bottom-right
+action-bar turn indicator via normalized template matching (`cv2.TM_CCOEFF_NORMED`).
 """
-
 
 import cv2
 import numpy as np
@@ -15,7 +14,9 @@ from onmyoji_helper.domain.models import UNKNOWN_SHIKIGAMI
 class ActionBarDetector:
     """Detects the active acting shikigami on the action bar using normalized template matching."""
 
-    CONF_THRESHOLD: float = 0.55
+    # Calibrated threshold matching original battle-proven `daf2cea` (`0.15`), accounting for
+    # rectangular draft card portraits vs. circular butterfly-framed action-bar turn indicators.
+    CONF_THRESHOLD: float = 0.15
 
     def __init__(self) -> None:
         """Initializes relative avatar ROI ratios, normalized sizes, and template buffers."""
@@ -35,18 +36,35 @@ class ActionBarDetector:
 
         self.prep_templates: dict[str, np.ndarray] = {}
         self.slot_to_shiki: dict[str, str] = {}
+        self.templates_locked: bool = False
+
+    @property
+    def has_locked_templates(self) -> bool:
+        """Returns True if 5 valid draft portrait templates are locked for the current match."""
+        return self.templates_locked and len(self.prep_templates) == 5
 
     def reset(self) -> None:
-        """Clears captured avatar fingerprint templates and slot-name bindings."""
+        """Clears captured avatar fingerprint templates and slot-name bindings on match end."""
         self.prep_templates.clear()
         self.slot_to_shiki.clear()
+        self.templates_locked = False
+
+    def bind_picks(self, our_picks: list[str] | None) -> None:
+        """Updates `Slot 1..5 -> shikigami` bindings without discarding captured portrait images."""
+        if our_picks and len(our_picks) == 5:
+            self.slot_to_shiki = {f"Slot {idx + 1}": name for idx, name in enumerate(our_picks)}
 
     def capture_prep_templates(
         self,
         frame: np.ndarray | None,
         our_picks: list[str] | None = None,
+        lock_on_success: bool = False,
     ) -> bool:
-        """Captures 5 ally avatar fingerprint templates during prep phase and binds slot names."""
+        """Captures 5 ally avatar fingerprint templates and optionally locks them for the match."""
+        if self.has_locked_templates:
+            self.bind_picks(our_picks)
+            return True
+
         if frame is None:
             return False
 
@@ -80,9 +98,9 @@ class ActionBarDetector:
         if len(temp_crops) == 5:
             self.prep_templates = temp_crops
             self.slot_to_shiki.clear()
-            if our_picks and len(our_picks) == 5:
-                for idx, name in enumerate(our_picks):
-                    self.slot_to_shiki[f"Slot {idx + 1}"] = name
+            self.bind_picks(our_picks)
+            if lock_on_success:
+                self.templates_locked = True
             return True
         return False
 
@@ -90,7 +108,7 @@ class ActionBarDetector:
         self,
         frame: np.ndarray | None,
     ) -> tuple[str | None, str, float]:
-        """Identifies the active acting shikigami slot and name on the current turn."""
+        """Identifies the active acting shikigami slot and name via `cv2.TM_CCOEFF_NORMED`."""
         if not self.prep_templates or frame is None:
             return None, UNKNOWN_SHIKIGAMI, 0.0
 

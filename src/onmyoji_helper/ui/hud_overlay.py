@@ -88,13 +88,10 @@ class BattleOverlayUI:
 
             if self.window.state() != "normal":
                 self.window.deiconify()
-                self.enable_click_through()
 
             if curr_rect == self._last_rect and self.canvas.winfo_width() > 1 and self.canvas.winfo_height() > 1:
                 return
 
-            # Synchronize BOTH Tcl/Tk geometry manager (canvas clip area) and Win32 topmost rect
-            self.window.geometry(f"{w}x{h}+{pt_x}+{pt_y}")
             overlay_hwnd = self._get_win32_hwnd()
             win32gui.SetWindowPos(
                 overlay_hwnd,

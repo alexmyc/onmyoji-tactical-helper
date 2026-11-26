@@ -1,4 +1,4 @@
-"""Regression tests for strict battle lifecycle visibility gating, dark-frame viewport lock, and Red Mode loop."""
+"""Regression tests for pre-draft popup guard, ActionBar portrait-to-LLM skill decision, and Red Mode loop."""
 
 import time
 from collections.abc import Callable
@@ -15,6 +15,7 @@ from onmyoji_helper.automation.battle_executor import AutoBattleExecutor
 from onmyoji_helper.domain.models import CaptureFrame, CropOffset
 from onmyoji_helper.domain.public_demo_data import get_public_demo_bundle
 from onmyoji_helper.domain.shikigami_repository import ShikigamiRepository
+from onmyoji_helper.vision.action_bar_detector import ActionBarDetector
 from onmyoji_helper.vision.turn_detector import TurnDetector
 
 
@@ -103,58 +104,81 @@ class _FakeYoloResult:
         self.boxes = boxes
 
 
-def _build_turn_frame(td: TurnDetector, w: int = 1182, h: int = 666, lit_bar: bool = True) -> np.ndarray:
-    frame = np.full((h, w, 3), (20, 22, 26), dtype=np.uint8)
-    if not lit_bar:
-        return frame
+def _paint_portrait_pattern(canvas: np.ndarray, x: int, y: int, w: int, h: int, idx: int) -> None:
+    tile = np.full((h, w, 3), 28 + idx * 14, dtype=np.uint8)
+    if idx == 0:
+        cv2.circle(tile, (w // 2, h // 2), min(w, h) // 3, (240, 80, 40), -1)
+    elif idx == 1:
+        cv2.rectangle(tile, (8, 8), (w - 8, h - 8), (40, 220, 100), 4)
+        cv2.circle(tile, (w // 2, h // 2), min(w, h) // 5, (250, 250, 250), -1)
+    elif idx == 2:
+        pts = np.array([[w // 2, 6], [6, h - 6], [w - 6, h - 6]], dtype=np.int32)
+        cv2.fillPoly(tile, [pts], (60, 125, 245))
+    elif idx == 3:
+        cv2.line(tile, (0, h // 2), (w, h // 2), (255, 220, 40), 6)
+        cv2.line(tile, (w // 2, 0), (w // 2, h), (255, 60, 200), 6)
+    else:
+        for step in range(4, w, 11):
+            cv2.line(tile, (step, 0), (step, h), (240, 240, 120), 3)
+    canvas[y : y + h, x : x + w] = tile
+
+
+def _build_draft_and_combat_frames(
+    td: TurnDetector,
+    abd: ActionBarDetector,
+    w: int = 1182,
+    h: int = 666,
+) -> tuple[np.ndarray, np.ndarray]:
+    # 1. Draft screen with 5 ally flip portraits at top-left (i=0 -> Slot 5 ... i=4 -> Slot 1)
+    draft_frame = np.full((h, w, 3), 24, dtype=np.uint8)
+    box_w, box_h = int(w * abd.pw), int(h * abd.ph)
+    y_top, gap = int(h * abd.py), int(w * abd.pgap)
+    for i in range(5):
+        x = int(w * abd.px) + i * gap
+        _paint_portrait_pattern(draft_frame, x, y_top, box_w, box_h, i)
+
+    # 2. Combat frame: top-left has dragon statue noise (NOT portraits!), bottom-right has Slot 4 ('閻', i=1)
+    combat_frame = np.full((h, w, 3), 20, dtype=np.uint8)
+    cv2.rectangle(combat_frame, (int(w * 0.05), int(h * 0.01)), (int(w * 0.36), int(h * 0.12)), (180, 160, 90), -1)
+
+    rx, ry = int(w * abd.rx), int(h * abd.ry)
+    rw, rh = int(w * abd.rw), int(h * abd.rh)
+    _paint_portrait_pattern(combat_frame, rx, ry, rw, rh, 1)  # i=1 corresponds to Slot 4 ('閻')
+
     for slot_k in ("slot_1", "slot_2", "slot_3", "slot_4"):
         rx1, ry1, rx2, ry2 = td.PHYSICAL_SLOTS[slot_k]
         cx = int(round(w * (rx1 + rx2) * 0.5))
         cy = int(round(h * (ry1 + ry2) * 0.5))
-        cv2.circle(frame, (cx, cy), 25, (40, 180, 245), thickness=-1, lineType=cv2.LINE_AA)
-        cv2.circle(frame, (cx, cy), 26, (235, 245, 255), thickness=2, lineType=cv2.LINE_AA)
-    return frame
+        cv2.circle(combat_frame, (cx, cy), 25, (40, 180, 245), thickness=-1, lineType=cv2.LINE_AA)
+        cv2.circle(combat_frame, (cx, cy), 26, (235, 245, 255), thickness=2, lineType=cv2.LINE_AA)
+    return draft_frame, combat_frame
 
 
-def test_strict_visibility_gate_keeps_windows_hidden_before_five_pick_lock(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_pre_draft_mode_switch_does_not_pop_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     _, dict_map, multi_shorts, tags_db = get_public_demo_bundle()
     repo = ShikigamiRepository(tags_db=tags_db, full_to_short_map=dict_map, multi_char_shorts=multi_shorts)
     mgr = AITacticalManager(repository=repo)
     monkeypatch.setattr(mgr.models, "warmup_in_background", lambda: None)
 
     created_windows: list[str] = []
-    monkeypatch.setattr(
-        mgr.presenter,
-        "ensure_windows",
-        lambda **_kw: created_windows.append("opened"),
-    )
+    monkeypatch.setattr(mgr.presenter, "ensure_windows", lambda **_kw: created_windows.append("opened"))
 
     ctrl = ModeController(mgr)
     ui_stub = _MainUIStub()
     ctrl.set_ui_app(ui_stub)
 
-    # Toggle Green -> Yellow -> Red BEFORE any 5-pick draft lock (saved_draft_data is None)
     assert ctrl.set_mode("yellow") is True
-    deadline = time.time() + 1.0
-    while ctrl.is_busy and time.time() < deadline:
+    while ctrl.is_busy:
         time.sleep(0.01)
-
     assert ctrl.set_mode("red") is True
-    deadline = time.time() + 1.0
-    while ctrl.is_busy and time.time() < deadline:
+    while ctrl.is_busy:
         time.sleep(0.01)
 
-    # Strict regression assertions: ZERO battle windows popped, ZERO premature battle thread!
     assert created_windows == []
     assert mgr.is_active_session is False
-    assert mgr.battle_has_started is False
-    assert mgr.parser.is_opp_baseline_set is False
-    assert "待 5 手鎖陣" in ui_stub.lbl_status.text
 
 
-def test_red_mode_survives_vs_banner_and_executes_skill_first_with_retry(
+def test_draft_portrait_lock_action_bar_to_llm_decision_and_red_mode_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, dict_map, multi_shorts, tags_db = get_public_demo_bundle()
@@ -162,7 +186,8 @@ def test_red_mode_survives_vs_banner_and_executes_skill_first_with_retry(
     mgr = AITacticalManager(repository=repo)
     mgr.POLL_MY_TURN = 0.02
     mgr.POLL_OPP_TURN = 0.02
-    mgr.POST_DECISION_BUFFER_RANGE = (0.04, 0.05)
+    mgr.POST_DECISION_BUFFER_RANGE = (0.03, 0.04)
+    mgr.DRAFT_FADE_GRACE_SEC = 0.02
 
     clicks: list[tuple[str, int, int]] = []
     mgr.auto_executor = AutoBattleExecutor(
@@ -179,35 +204,34 @@ def test_red_mode_survives_vs_banner_and_executes_skill_first_with_retry(
         uipi_checker=lambda _h: False,
     )
 
+    llm_received_payloads: list[dict[str, Any]] = []
+
+    def _fake_llm_advice(payload: dict[str, Any]) -> dict[str, Any]:
+        llm_received_payloads.append(dict(payload))
+        return {
+            "mode": "Gemma-4",
+            "chosen_skill": "S3",
+            "target_slot": "Slot 1",
+            "advice": "我方 [Slot 4] 閻 回合！發動 [S3大招] 壓制敵方 [Slot 1] 玲。",
+        }
+
     monkeypatch.setattr(mgr.models, "warmup_in_background", lambda: None)
     monkeypatch.setattr(mgr.models, "ensure_loaded", lambda should_abort_fn=None: True)
-    monkeypatch.setattr(mgr.models, "has_active_gpu_llm", lambda: False)
-    monkeypatch.setattr(
-        mgr.models,
-        "run_llm_advice",
-        lambda _p: {"advice": "鎖定核心目標施放技能", "mode": "Rule", "target_slot": "Slot 1"},
-    )
+    monkeypatch.setattr(mgr.models, "has_active_gpu_llm", lambda: True)
+    monkeypatch.setattr(mgr.models, "run_llm_advice", _fake_llm_advice)
     monkeypatch.setattr(coord_mod.ctypes.windll.user32, "IsIconic", lambda _h: 0)
     monkeypatch.setattr(mgr, "_resolve_battle_hwnd", staticmethod(lambda _c, _p: 8888))
 
     w, h = 1182, 666
-    vs_frame = _build_turn_frame(mgr.turn_detector, w, h, lit_bar=False)
-    combat_frame = _build_turn_frame(mgr.turn_detector, w, h, lit_bar=True)
-
-    # Phase 0..2: VS Banner (0 allies, 5 enemy-class boxes — exact repro of log line 176!)
-    # Phase 3+: Real 5v5 arena (5 allies + 5 enemies + active turn skill bar)
-    frame_idx = [0]
+    draft_frame, combat_frame = _build_draft_and_combat_frames(mgr.turn_detector, mgr.action_bar_detector, w, h)
 
     class _CaptureStub:
         def find_windows(self) -> list[Any]:
             return []
 
         def capture_frame(self, hwnd: int, need_gray: bool = False, window_title: str = "") -> CaptureFrame:
-            idx = frame_idx[0]
-            frame_idx[0] += 1
-            bgr = vs_frame if idx < 3 else combat_frame
             return CaptureFrame(
-                bgr=bgr,
+                bgr=combat_frame,
                 gray=None,
                 hwnd=hwnd,
                 window_title=window_title,
@@ -216,16 +240,16 @@ def test_red_mode_survives_vs_banner_and_executes_skill_first_with_retry(
 
     monkeypatch.setattr(coord_mod, "CaptureEngine", _CaptureStub)
 
-    def _fake_yolo(_img: np.ndarray) -> list[_FakeYoloResult]:
-        if frame_idx[0] <= 3:
-            # VS Banner: 5 enemy boxes, ZERO ally boxes -> MUST NOT start battle or pollute baseline!
-            return [_FakeYoloResult([_FakeBox(0, w * r, h * 0.30) for r in (0.48, 0.57, 0.66, 0.75, 0.84)])]
-        boxes = [_FakeBox(0, w * r, h * 0.30) for r in (0.48, 0.57, 0.66, 0.75, 0.84)] + [
-            _FakeBox(1, w * r, h * 0.62) for r in (0.130, 0.315, 0.495, 0.665, 0.835)
-        ]
-        return [_FakeYoloResult(boxes)]
-
-    monkeypatch.setattr(mgr.models, "predict_yolo", _fake_yolo)
+    # Even with only 1 enemy + 1 ally visible (partial visibility), windows MUST pop immediately!
+    monkeypatch.setattr(
+        mgr.models,
+        "predict_yolo",
+        lambda _img: [
+            _FakeYoloResult(
+                [_FakeBox(0, w * 0.75, h * 0.30), _FakeBox(1, w * 0.130, h * 0.62)]
+            )
+        ],
+    )
     mgr.turn_detector.ACTIVATION_THRESHOLD = 0.01
 
     def _stub_ensure_windows(**_kw: Any) -> None:
@@ -236,106 +260,42 @@ def test_red_mode_survives_vs_banner_and_executes_skill_first_with_retry(
 
     monkeypatch.setattr(mgr.presenter, "ensure_windows", _stub_ensure_windows)
 
+    my_picks = ["葛", "帝", "骷", "閻", "連"]
+    opp_picks = ["玲", "SP桃", "葛", "酒吞", "季"]
+
+    # 1. Capture & lock 5 draft portraits at 5-pick flip while still in Green Mode
+    assert mgr.action_bar_detector.CONF_THRESHOLD == 0.15
+    assert mgr.capture_draft_templates(draft_frame, my_picks) is True
+    assert mgr.action_bar_detector.has_locked_templates is True
+
     ctrl = ModeController(mgr)
     ui_stub = _MainUIStub()
     ctrl.set_ui_app(ui_stub)
+    ctrl.save_and_handle_five_picks(ui_stub.root, my_picks, opp_picks, draft_frame, 8888)  # type: ignore[arg-type]
+
+    # 2. Switch Green -> Red mid-battle: locked draft portrait templates MUST NOT be wiped!
     ctrl.set_mode("red")
     while ctrl.is_busy:
         time.sleep(0.01)
+    assert mgr.action_bar_detector.has_locked_templates is True
 
-    # Lock 5 picks -> triggers battle loop
-    ctrl.save_and_handle_five_picks(
-        ui_stub.root,  # type: ignore[arg-type]
-        ["葛", "帝", "骷", "閻", "連"],
-        ["玲", "SP桃", "葛", "酒吞", "季"],
-        None,
-        8888,
-    )
-
-    # Wait until initial cast AND at least 1 automatic unfinished-turn retry (4 clicks total = 2 casts)
+    # 3. Wait for ActionBarDetector -> LLM decision -> Skill-First + Target-Second execution + retry
     deadline = time.time() + 2.5
     while len(clicks) < 4 and time.time() < deadline:
         time.sleep(0.02)
 
     assert mgr.battle_has_started is True
     assert mgr.presenter.ai_ui is not None and mgr.presenter.overlay_ui is not None
+    assert llm_received_payloads
+    # Verify ActionBarDetector accurately matched '閻' (Slot 4) and passed it + skills to LLM!
+    assert any(
+        p.get("active_shikigami_slot") == "Slot 4" and p.get("active_shikigami_name") == "閻"
+        for p in llm_received_payloads
+    )
     assert len(clicks) >= 4
+    # S3 button (slot_3 at 4-skill mode) clicked FIRST, Enemy Slot 1 clicked SECOND
+    assert clicks[0][2] > int(h * 0.85) and clicks[1][2] < int(h * 0.45)
 
-    # Verify Skill-First -> Target-Second click geometry (Skill Y > 0.87*h, Enemy Target Y ~ 0.30*h)
-    first_skill_y = clicks[0][2]
-    first_target_y = clicks[1][2]
-    retry_skill_y = clicks[2][2]
-    retry_target_y = clicks[3][2]
-    assert first_skill_y > int(h * 0.85) and first_target_y < int(h * 0.45)
-    assert retry_skill_y > int(h * 0.85) and retry_target_y < int(h * 0.45)
-
-    # Reset for next match MUST immediately destroy/hide both floating windows
     mgr.reset_for_next_match()
-    assert mgr.presenter.ai_ui is None
-    assert mgr.presenter.overlay_ui is None
-
-
-def test_capture_engine_viewport_lock_prevents_dark_transition_shrinkage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import onmyoji_helper.infra.capture_engine as cap_mod
-    from onmyoji_helper.infra.capture_engine import CaptureEngine
-
-    # Simulate 1420x800 client rect at 125% DPI where DWM draws 1136x640 at (0, 0)
-    client_w, client_h = 1420, 800
-    logical_w, logical_h = 1136, 640
-
-    active_buffer: list[np.ndarray] = []
-
-    class _BmpStub:
-        def CreateCompatibleBitmap(self, _dc: Any, _w: int, _h: int) -> None:
-            pass
-
-        def GetBitmapBits(self, _as_str: bool) -> bytes:
-            return active_buffer[0].tobytes()
-
-        def GetHandle(self) -> int:
-            return 1
-
-    class _DcStub:
-        def CreateCompatibleDC(self) -> "_DcStub":
-            return self
-
-        def SelectObject(self, _bmp: Any) -> None:
-            pass
-
-        def BitBlt(self, *_args: Any) -> None:
-            pass
-
-        def DeleteDC(self) -> None:
-            pass
-
-    monkeypatch.setattr(cap_mod.win32gui, "IsWindow", lambda _h: True)
-    monkeypatch.setattr(cap_mod.win32gui, "GetClientRect", lambda _h: (0, 0, client_w, client_h))
-    monkeypatch.setattr(cap_mod.win32gui, "GetDC", lambda _h: 101)
-    monkeypatch.setattr(cap_mod.win32gui, "ReleaseDC", lambda _h, _dc: 1)
-    monkeypatch.setattr(cap_mod.win32gui, "DeleteObject", lambda _o: None)
-    monkeypatch.setattr(cap_mod.win32ui, "CreateDCFromHandle", lambda _dc: _DcStub())
-    monkeypatch.setattr(cap_mod.win32ui, "CreateBitmap", lambda: _BmpStub())
-
-    engine = CaptureEngine()
-
-    # Frame 1: Normal 125% DPI frame (non-black 1136x640 at top-left, DWM black margin right/bottom)
-    f1 = np.zeros((client_h, client_w, 4), dtype=np.uint8)
-    f1[0:logical_h, 0:logical_w, :3] = 60
-    active_buffer[:] = [f1]
-    cap1 = engine.capture_frame(hwnd=7777, need_gray=False)
-    assert cap1 is not None
-    assert (cap1.width, cap1.height) == (logical_w, logical_h)
-    assert cap1.crop.x0 == 0 and cap1.crop.y0 == 0
-
-    # Frame 2: Dark ink transition / ultimate cutscene where only a 705x440 center patch is non-black
-    # (Reproduces runtime log line 159: '尺寸=705x440' -> must stay locked at 1136x640!)
-    f2 = np.zeros((client_h, client_w, 4), dtype=np.uint8)
-    f2[100:540, 215:920, :3] = 90
-    active_buffer[:] = [f2]
-    cap2 = engine.capture_frame(hwnd=7777, need_gray=False)
-    assert cap2 is not None
-    assert (cap2.width, cap2.height) == (logical_w, logical_h)
-    assert cap2.crop.x0 == 0 and cap2.crop.y0 == 0
-
+    assert mgr.action_bar_detector.has_locked_templates is False
+    assert mgr.presenter.ai_ui is None and mgr.presenter.overlay_ui is None

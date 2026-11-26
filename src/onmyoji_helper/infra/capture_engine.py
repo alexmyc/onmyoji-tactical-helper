@@ -42,9 +42,6 @@ class CaptureEngine:
         """
         self.target_title: str = target_title
         self._last_err_log_time: float = 0.0
-        # Per-HWND viewport cache: hwnd -> (client_w, client_h, logical_w, logical_h)
-        # Prevents dark skill VFX or ink transitions from shrinking captured frame dimensions.
-        self._viewport_cache: dict[int, tuple[int, int, int, int]] = {}
 
     def find_windows(self) -> list[gw.Window]:
         """Searches desktop windows matching the target game title while excluding browsers/editors."""
@@ -109,73 +106,30 @@ class CaptureEngine:
             img_bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
             temp_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
-            # Viewport-stabilized border & DWM-DPI margin crop:
-            # Dark cutscenes / ink transitions must NEVER shrink the established logical viewport
-            # (e.g. 1136x640 -> 705x440) or shift origin (x0, y0) asymmetrically.
+            # Dynamic per-frame black padding crop (vectorized O(H+W), ~0.2ms, zero stale-crop risk)
             rows_nonblack = np.any(temp_gray > 0, axis=1)
             cols_nonblack = np.any(temp_gray > 0, axis=0)
 
-            cached = self._viewport_cache.get(int(hwnd))
-            if cached is not None and cached[0] == width and cached[1] == height:
-                logical_w, logical_h = cached[2], cached[3]
-            else:
-                logical_w, logical_h = 0, 0
-
+            x0, y0 = 0, 0
             sym_pad_x, sym_pad_y = 0, 0
             if rows_nonblack.any() and cols_nonblack.any():
                 row_indices = np.flatnonzero(rows_nonblack)
                 col_indices = np.flatnonzero(cols_nonblack)
-                raw_y0, raw_y1 = int(row_indices[0]), int(row_indices[-1]) + 1
-                raw_x0, raw_x1 = int(col_indices[0]), int(col_indices[-1]) + 1
+                y0, y1 = int(row_indices[0]), int(row_indices[-1]) + 1
+                x0, x1 = int(col_indices[0]), int(col_indices[-1]) + 1
+                img_bgr = img_bgr[y0:y1, x0:x1]
+                img_gray = temp_gray[y0:y1, x0:x1] if need_gray else None
 
-                # DWM DPI scale is isotropic: (raw_x0 + raw_x1) / width == (raw_y0 + raw_y1) / height
-                est_lw = min(width, raw_x0 + raw_x1) if raw_x0 <= 64 else raw_x1
-                est_lh = min(height, raw_y0 + raw_y1) if raw_y0 <= 96 else raw_y1
-                if (
-                    est_lw >= int(width * 0.45)
-                    and est_lh >= int(height * 0.45)
-                    and abs((width / float(est_lw)) - (height / float(est_lh))) <= 0.08
-                ):
-                    logical_w = max(logical_w, est_lw)
-                    logical_h = max(logical_h, est_lh)
-                    self._viewport_cache[int(hwnd)] = (width, height, logical_w, logical_h)
-                elif logical_w > 0 and logical_h > 0:
-                    if raw_x1 > logical_w and raw_y1 > logical_h:
-                        logical_w = min(width, raw_x1)
-                        logical_h = min(height, raw_y1)
-                        self._viewport_cache[int(hwnd)] = (width, height, logical_w, logical_h)
-
-                eff_lw = logical_w if logical_w > 0 else width
-                eff_lh = logical_h if logical_h > 0 else height
-
-                # Only crop inner letterbox/pillarbox when TWO opposite edges are symmetric while
-                # the perpendicular axis spans the full logical viewport (true 16:10 / 21:9 bars).
-                crop_x0, crop_x1 = 0, eff_lw
-                crop_y0, crop_y1 = 0, eff_lh
-                if (
-                    raw_x0 <= 4
-                    and abs(eff_lw - raw_x1) <= 4
-                    and raw_y0 >= 12
-                    and abs((eff_lh - raw_y1) - raw_y0) <= 8
-                ):
-                    crop_y0, crop_y1 = raw_y0, raw_y1
-                    sym_pad_y = raw_y0
-                elif (
-                    raw_y0 <= 4
-                    and abs(eff_lh - raw_y1) <= 4
-                    and raw_x0 >= 12
-                    and abs((eff_lw - raw_x1) - raw_x0) <= 8
-                ):
-                    crop_x0, crop_x1 = raw_x0, raw_x1
-                    sym_pad_x = raw_x0
-
-                img_bgr = img_bgr[crop_y0:crop_y1, crop_x0:crop_x1]
-                img_gray = temp_gray[crop_y0:crop_y1, crop_x0:crop_x1] if need_gray else None
+                # Distinguish symmetric fullscreen letterbox/pillarbox bars (top & bottom / left & right)
+                # from right/bottom-only DWM DPI scaling margins (where x0=0, y0=0 and x1 = width / dpi_scale).
+                right_black = width - x1
+                bottom_black = height - y1
+                if x0 >= 12 and right_black >= (x0 - 4):
+                    sym_pad_x = x0
+                if y0 >= 12 and bottom_black >= (y0 - 4):
+                    sym_pad_y = y0
             else:
-                eff_lw = logical_w if logical_w > 0 else width
-                eff_lh = logical_h if logical_h > 0 else height
-                img_bgr = img_bgr[0:eff_lh, 0:eff_lw]
-                img_gray = temp_gray[0:eff_lh, 0:eff_lw] if need_gray else None
+                img_gray = temp_gray if need_gray else None
 
             return CaptureFrame(
                 bgr=img_bgr,

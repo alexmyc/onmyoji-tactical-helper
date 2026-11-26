@@ -18,7 +18,6 @@ class StateParser:
 
     OPP_GRACE_PERIOD: float = 3.5
     MY_GRACE_PERIOD: float = 3.5
-    MAX_RESIDUAL_STEP_RATIO: float = 0.035
 
     def __init__(self) -> None:
         """Initializes slot anchor ratios, 2D affine baselines, and EMA coordinate buffers."""
@@ -38,13 +37,6 @@ class StateParser:
             ("Slot 4", 0.84),
         ]
 
-        self._my_order_idx: dict[str, int] = {
-            name: idx for idx, (name, _) in enumerate(self.MY_SLOT_ANCHORS)
-        }
-        self._opp_order_idx: dict[str, int] = {
-            name: idx for idx, (name, _) in enumerate(self.OPP_SLOT_ANCHORS)
-        }
-
         self.baseline_opp: dict[str, tuple[float, float]] = {}
         self.is_opp_baseline_set: bool = False
 
@@ -58,8 +50,6 @@ class StateParser:
         self.smooth_pos_opp: dict[str, tuple[float, float]] = {}
         self.last_seen_opp: dict[str, float] = {}
         self.last_seen_my: dict[str, float] = {}
-        self._confirm_streak_opp: dict[str, int] = {}
-        self._confirm_streak_my: dict[str, int] = {}
 
     def reset_baseline(self) -> None:
         """Clears stored baseline positions, EMA buffers, and occlusion timers."""
@@ -73,8 +63,6 @@ class StateParser:
         self.smooth_pos_opp.clear()
         self.last_seen_opp.clear()
         self.last_seen_my.clear()
-        self._confirm_streak_opp.clear()
-        self._confirm_streak_my.clear()
 
     def _rescale_baselines_if_resized(self, screen_width: int, screen_height: int) -> None:
         """Proportionally rescales baselines and both EMA coordinate maps on live window resize."""
@@ -140,63 +128,6 @@ class StateParser:
                     predicted[slot_key] = (float(pred_x), float(pred_y))
         return predicted
 
-    @staticmethod
-    def _is_clean_five_formation(
-        boxes: list[dict[str, Any]],
-        anchors: list[tuple[str, float]],
-        screen_width: int,
-        max_anchor_dev_ratio: float,
-    ) -> bool:
-        """Verifies 5 sorted boxes are well-separated and aligned with canonical 5v5 anchors."""
-        if len(boxes) != 5 or screen_width <= 0:
-            return False
-        min_gap = screen_width * 0.035
-        max_dev = screen_width * max_anchor_dev_ratio
-        for i in range(4):
-            if (float(boxes[i + 1]["cx"]) - float(boxes[i]["cx"])) < min_gap:
-                return False
-        for i, (_, ratio) in enumerate(anchors):
-            if abs(float(boxes[i]["cx"]) - (ratio * screen_width)) > max_dev:
-                return False
-        return True
-
-    @staticmethod
-    def _violates_slot_x_order(
-        slot_name: str,
-        cand_x: float,
-        assigned_slot_x: dict[str, float],
-        order_map: dict[str, int],
-    ) -> bool:
-        """Prevents adjacent formation slots from swapping left-to-right identities under VFX."""
-        slot_ord = order_map.get(slot_name, -1)
-        if slot_ord < 0:
-            return False
-        for other_slot, other_x in assigned_slot_x.items():
-            other_ord = order_map.get(other_slot, -1)
-            if other_ord < slot_ord and cand_x <= (other_x + 4.0):
-                return True
-            if other_ord > slot_ord and cand_x >= (other_x - 4.0):
-                return True
-        return False
-
-    @staticmethod
-    def _clamp_residual_jump(
-        raw_x: float,
-        raw_y: float,
-        ref_pos: tuple[float, float] | None,
-        max_step_px: float,
-    ) -> tuple[float, float]:
-        """Clamps single-frame outlier jumps (lunging animations / VFX noise) relative to `ref_pos`."""
-        if ref_pos is None or max_step_px <= 0.0:
-            return raw_x, raw_y
-        dx = raw_x - ref_pos[0]
-        dy = raw_y - ref_pos[1]
-        dist = float(np.hypot(dx, dy))
-        if dist <= max_step_px or dist <= 1e-6:
-            return raw_x, raw_y
-        scale = max_step_px / dist
-        return ref_pos[0] + dx * scale, ref_pos[1] + dy * scale
-
     def parse_frame(
         self,
         my_draft: list[str],
@@ -230,13 +161,7 @@ class StateParser:
             self._rescale_baselines_if_resized(screen_width, actual_h)
 
         enemy_boxes = sorted(
-            [
-                b
-                for b in yolo_boxes
-                if b.get("cls") == 0
-                and (screen_width * 0.25) <= b.get("cx", 0) <= (screen_width * 0.93)
-                and (actual_h * 0.06) <= b.get("cy", 0) <= (actual_h * 0.62)
-            ],
+            [b for b in yolo_boxes if b.get("cls") == 0],
             key=lambda b: b.get("cx", 0),
         )
         ally_boxes = sorted(
@@ -270,9 +195,7 @@ class StateParser:
         if screen_width <= 0:
             return my_status, opp_status
 
-        if not self.is_opp_baseline_set and self._is_clean_five_formation(
-            enemy_boxes, self.OPP_SLOT_ANCHORS, screen_width, max_anchor_dev_ratio=0.12
-        ):
+        if len(enemy_boxes) == 5 and not self.is_opp_baseline_set:
             if self.baseline_w <= 0:
                 self.baseline_w, self.baseline_h = screen_width, actual_h
             for i, box in enumerate(enemy_boxes[:5]):
@@ -280,9 +203,7 @@ class StateParser:
                 self.baseline_opp[slot_name] = (float(box["cx"]), float(box["cy"]))
             self.is_opp_baseline_set = True
 
-        if not self.is_my_baseline_set and self._is_clean_five_formation(
-            ally_boxes, self.MY_SLOT_ANCHORS, screen_width, max_anchor_dev_ratio=0.15
-        ):
+        if len(ally_boxes) == 5 and not self.is_my_baseline_set:
             if self.baseline_w <= 0:
                 self.baseline_w, self.baseline_h = screen_width, actual_h
             for i, box in enumerate(ally_boxes[:5]):
@@ -292,26 +213,20 @@ class StateParser:
 
         predicted_opp_pos = (
             self._estimate_affine_predictions(enemy_boxes, self.baseline_opp, screen_width * 0.06)
-            if len(self.baseline_opp) >= 3
+            if self.is_opp_baseline_set
             else {}
         )
         predicted_my_pos = (
             self._estimate_affine_predictions(ally_boxes, self.baseline_my, screen_width * 0.08)
-            if len(self.baseline_my) >= 3
+            if self.is_my_baseline_set
             else {}
         )
 
-        max_residual_step = screen_width * self.MAX_RESIDUAL_STEP_RATIO
-
-        # Enemy slot assignment + monotonic slot lock + residual jump clamp + EMA smoothing
+        # Enemy slot assignment + EMA smoothing
         strict_radius_opp = screen_width * 0.06
         opp_candidates: list[tuple[float, str, int]] = []
         for slot_name, anchor_ratio in self.OPP_SLOT_ANCHORS:
-            target_pos = (
-                predicted_opp_pos.get(slot_name)
-                or self.smooth_pos_opp.get(slot_name)
-                or self.baseline_opp.get(slot_name)
-            )
+            target_pos = predicted_opp_pos.get(slot_name) or self.baseline_opp.get(slot_name)
             tx = target_pos[0] if target_pos else (anchor_ratio * screen_width)
             ty = target_pos[1] if target_pos else 0.0
             for b_idx, b in enumerate(enemy_boxes):
@@ -320,49 +235,30 @@ class StateParser:
                     opp_candidates.append((dist, slot_name, b_idx))
 
         opp_candidates.sort(key=lambda x: x[0])
-        assigned_opp_slots: dict[str, float] = {}
-        assigned_opp_boxes: set[int] = set()
+        assigned_opp_slots = set()
+        assigned_opp_boxes = set()
         for _, slot_name, b_idx in opp_candidates:
-            if slot_name in assigned_opp_slots or b_idx in assigned_opp_boxes:
-                continue
-            box = enemy_boxes[b_idx]
-            raw_ox, raw_oy = float(box["cx"]), float(box["cy"])
-            if self._violates_slot_x_order(slot_name, raw_ox, assigned_opp_slots, self._opp_order_idx):
-                continue
+            if slot_name not in assigned_opp_slots and b_idx not in assigned_opp_boxes:
+                assigned_opp_slots.add(slot_name)
+                assigned_opp_boxes.add(b_idx)
+                box = enemy_boxes[b_idx]
+                raw_ox, raw_oy = float(box["cx"]), float(box["cy"])
+                if slot_name in self.smooth_pos_opp:
+                    old_ox, old_oy = self.smooth_pos_opp[slot_name]
+                    sm_ox = 0.45 * raw_ox + 0.55 * old_ox
+                    sm_oy = 0.45 * raw_oy + 0.55 * old_oy
+                else:
+                    sm_ox, sm_oy = raw_ox, raw_oy
+                self.smooth_pos_opp[slot_name] = (sm_ox, sm_oy)
+                opp_status[slot_name]["alive"] = True
+                opp_status[slot_name]["pos"] = (int(round(sm_ox)), int(round(sm_oy)))
+                self.last_seen_opp[slot_name] = current_time
 
-            assigned_opp_slots[slot_name] = raw_ox
-            assigned_opp_boxes.add(b_idx)
-
-            ref_opp = predicted_opp_pos.get(slot_name) or self.smooth_pos_opp.get(slot_name)
-            clamped_ox, clamped_oy = self._clamp_residual_jump(raw_ox, raw_oy, ref_opp, max_residual_step)
-            if slot_name in self.smooth_pos_opp:
-                old_ox, old_oy = self.smooth_pos_opp[slot_name]
-                sm_ox = 0.45 * clamped_ox + 0.55 * old_ox
-                sm_oy = 0.45 * clamped_oy + 0.55 * old_oy
-            else:
-                sm_ox, sm_oy = clamped_ox, clamped_oy
-            self.smooth_pos_opp[slot_name] = (sm_ox, sm_oy)
-
-            if slot_name not in self.baseline_opp:
-                self._confirm_streak_opp[slot_name] = self._confirm_streak_opp.get(slot_name, 0) + 1
-                if self._confirm_streak_opp[slot_name] >= 3:
-                    if self.baseline_w <= 0:
-                        self.baseline_w, self.baseline_h = screen_width, actual_h
-                    self.baseline_opp[slot_name] = (sm_ox, sm_oy)
-
-            opp_status[slot_name]["alive"] = True
-            opp_status[slot_name]["pos"] = (int(round(sm_ox)), int(round(sm_oy)))
-            self.last_seen_opp[slot_name] = current_time
-
-        # Ally slot assignment + monotonic slot lock + residual jump clamp + EMA smoothing
+        # Ally slot assignment + EMA smoothing
         strict_radius_ally = screen_width * 0.08
         ally_candidates: list[tuple[float, str, int]] = []
         for slot_name, anchor_ratio in self.MY_SLOT_ANCHORS:
-            target_pos = (
-                predicted_my_pos.get(slot_name)
-                or self.smooth_pos_my.get(slot_name)
-                or self.baseline_my.get(slot_name)
-            )
+            target_pos = predicted_my_pos.get(slot_name) or self.baseline_my.get(slot_name)
             tx = target_pos[0] if target_pos else (anchor_ratio * screen_width)
             ty = target_pos[1] if target_pos else 0.0
             for b_idx, b in enumerate(ally_boxes):
@@ -371,39 +267,24 @@ class StateParser:
                     ally_candidates.append((dist, slot_name, b_idx))
 
         ally_candidates.sort(key=lambda x: x[0])
-        assigned_my_slots: dict[str, float] = {}
-        assigned_my_boxes: set[int] = set()
+        assigned_my_slots = set()
+        assigned_my_boxes = set()
         for _, slot_name, b_idx in ally_candidates:
-            if slot_name in assigned_my_slots or b_idx in assigned_my_boxes:
-                continue
-            box = ally_boxes[b_idx]
-            raw_cx, raw_cy = float(box["cx"]), float(box["cy"])
-            if self._violates_slot_x_order(slot_name, raw_cx, assigned_my_slots, self._my_order_idx):
-                continue
-
-            assigned_my_slots[slot_name] = raw_cx
-            assigned_my_boxes.add(b_idx)
-
-            ref_my = predicted_my_pos.get(slot_name) or self.smooth_pos_my.get(slot_name)
-            clamped_cx, clamped_cy = self._clamp_residual_jump(raw_cx, raw_cy, ref_my, max_residual_step)
-            if slot_name in self.smooth_pos_my:
-                old_cx, old_cy = self.smooth_pos_my[slot_name]
-                sm_cx = 0.30 * clamped_cx + 0.70 * old_cx
-                sm_cy = 0.30 * clamped_cy + 0.70 * old_cy
-            else:
-                sm_cx, sm_cy = clamped_cx, clamped_cy
-            self.smooth_pos_my[slot_name] = (sm_cx, sm_cy)
-
-            if slot_name not in self.baseline_my:
-                self._confirm_streak_my[slot_name] = self._confirm_streak_my.get(slot_name, 0) + 1
-                if self._confirm_streak_my[slot_name] >= 3:
-                    if self.baseline_w <= 0:
-                        self.baseline_w, self.baseline_h = screen_width, actual_h
-                    self.baseline_my[slot_name] = (sm_cx, sm_cy)
-
-            my_status[slot_name]["alive"] = True
-            my_status[slot_name]["pos"] = (int(round(sm_cx)), int(round(sm_cy)))
-            self.last_seen_my[slot_name] = current_time
+            if slot_name not in assigned_my_slots and b_idx not in assigned_my_boxes:
+                assigned_my_slots.add(slot_name)
+                assigned_my_boxes.add(b_idx)
+                box = ally_boxes[b_idx]
+                raw_cx, raw_cy = float(box["cx"]), float(box["cy"])
+                if slot_name in self.smooth_pos_my:
+                    old_cx, old_cy = self.smooth_pos_my[slot_name]
+                    sm_cx = 0.30 * raw_cx + 0.70 * old_cx
+                    sm_cy = 0.30 * raw_cy + 0.70 * old_cy
+                else:
+                    sm_cx, sm_cy = raw_cx, raw_cy
+                self.smooth_pos_my[slot_name] = (sm_cx, sm_cy)
+                my_status[slot_name]["alive"] = True
+                my_status[slot_name]["pos"] = (int(round(sm_cx)), int(round(sm_cy)))
+                self.last_seen_my[slot_name] = current_time
 
         # Symmetric temporal grace period recovery for BOTH enemy and ally units during VFX occlusions
         for slot_name, info in opp_status.items():
