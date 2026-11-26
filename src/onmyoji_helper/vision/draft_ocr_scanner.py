@@ -28,14 +28,18 @@ DOWNSCALED_OPP_ROI_HEIGHT: int = 440
 
 OCR_FALLBACK_INTERVAL: float = 1.2
 IN_BATTLE_DIFF_INTERVAL: float = 4.5
+POST_PICK_BAN_SCAN_SEC: float = 25.0
+TOP_BAN_PAD_PX: int = 10
 DRAFT_MEAN_DIFF_THRESH: float = 3.2
 DRAFT_PEAK_DIFF_THRESH: float = 12.0
 DEFAULT_MIN_OCR_CONFIDENCE: float = 0.42
 DEFAULT_KNOWN_TOKEN_MIN_CONFIDENCE: float = 0.28
 DEFAULT_MIN_CONSECUTIVE_FRAMES: int = 2
 
-# UI-structural Ban-header keywords only (domain shikigami tokens are injected via `known_tokens`)
-_DRAFT_HEADER_KEYWORDS: frozenset[str] = frozenset({"禁", "禁選", "禁选", "禁用"})
+# UI-structural Ban / Post-Pick Extra-Ban header keywords
+_DRAFT_HEADER_KEYWORDS: frozenset[str] = frozenset(
+    {"禁", "禁選", "禁选", "禁用", "加禁", "已禁", "被禁", "對方禁", "对方禁"}
+)
 
 
 def _normalize_matched_known_token(
@@ -49,11 +53,14 @@ def _normalize_matched_known_token(
         return None
     if cleaned in known_whitelist or cleaned in _DRAFT_HEADER_KEYWORDS:
         return cleaned
-    if any(kw in cleaned for kw in ("禁用", "禁選", "禁选")):
+    if any(kw in cleaned for kw in ("禁用", "禁選", "禁选", "加禁", "已禁", "被禁")):
         remainder = (
             cleaned.replace("禁用", "")
             .replace("禁選", "")
             .replace("禁选", "")
+            .replace("加禁", "")
+            .replace("已禁", "")
+            .replace("被禁", "")
             .replace("對方", "")
             .replace("对方", "")
             .strip()
@@ -120,6 +127,7 @@ class DraftOcrScanner:
         self.prev_my_small_blur: np.ndarray | None = None
         self.last_ocr_time: float = 0.0
         self.last_window_size: tuple[int, int] = (0, 0)
+        self._five_picks_enter_ts: float = 0.0
         self._token_streaks: dict[str, dict[str, int]] = {}
 
     def _ensure_ocr_engine(self) -> Callable[[np.ndarray], tuple[Any, Any]]:
@@ -142,6 +150,7 @@ class DraftOcrScanner:
         """Resets ROI blur buffers and multi-frame OCR streak counters on match reset or resize."""
         self.prev_opp_small_blur = None
         self.prev_my_small_blur = None
+        self._five_picks_enter_ts = 0.0
         self._token_streaks.clear()
 
     def _has_pending_verifications(self) -> bool:
@@ -246,20 +255,35 @@ class DraftOcrScanner:
         if screen_gray is None:
             screen_gray = cv2.cvtColor(screen_color, cv2.COLOR_BGR2GRAY)
 
-        # Extend left boundary to 0.36 before Ban lock so top-center Ban badge/name is never clipped;
-        # extend bottom to 0.55 so Pick 5 at bottom of column is fully covered in both OCR and motion diff.
-        opp_x_start = int(w * 0.36) if not has_locked_opp_ban else int(w * 0.45)
-        opp_x_end = int(w * 0.94)
-        opp_y_end = int(h * 0.55)
+        if in_battle_five_picks:
+            if self._five_picks_enter_ts == 0.0:
+                self._five_picks_enter_ts = now_ts
+        else:
+            self._five_picks_enter_ts = 0.0
+
+        # Keep full Ban/Pick scanning active for 25s after Pick 5 so post-pick '加禁' is never missed!
+        in_post_pick_ban_window = (
+            in_battle_five_picks
+            and self._five_picks_enter_ts > 0.0
+            and (now_ts - self._five_picks_enter_ts) < POST_PICK_BAN_SCAN_SEC
+        )
+        use_settle_lowres_mode = in_battle_five_picks and not in_post_pick_ban_window
+
+        # Top y=0 is completely unclipped; extend x to 0.32..0.99 during Ban & Post-Pick Extra-Ban
+        opp_x_start = (
+            int(w * 0.32) if (not has_locked_opp_ban or in_post_pick_ban_window) else int(w * 0.44)
+        )
+        opp_x_end = int(w * 0.99)
+        opp_y_end = int(h * 0.56)
         roi_opp_color = screen_color[0:opp_y_end, opp_x_start:opp_x_end]
-        roi_opp_motion_gray = screen_gray[0:opp_y_end, int(w * 0.36) : opp_x_end]
+        roi_opp_motion_gray = screen_gray[0:opp_y_end, int(w * 0.32) : opp_x_end]
 
         curr_opp_small_blur = get_downsampled_blur(roi_opp_motion_gray)
         curr_my_small_blur: np.ndarray | None = None
         roi_my_color: np.ndarray | None = None
         run_ocr = True
 
-        if in_battle_five_picks:
+        if use_settle_lowres_mode:
             if self.prev_opp_small_blur is not None and curr_opp_small_blur is not None:
                 diff_opp = cv2.mean(cv2.absdiff(curr_opp_small_blur, self.prev_opp_small_blur))[0]
                 if diff_opp < 6.0 and (now_ts - self.last_ocr_time) < IN_BATTLE_DIFF_INTERVAL:
@@ -271,11 +295,11 @@ class DraftOcrScanner:
             roi_my_motion_gray = screen_gray[my_y_start:my_y_end, my_x_start:my_x_end]
             curr_my_small_blur = get_downsampled_blur(roi_my_motion_gray)
 
-            # Never skip OCR before Ban lock or while a token awaits 2nd-frame confirmation;
-            # cap static skip at `OCR_FALLBACK_INTERVAL = 1.2s` matching `daf2cea`!
+            # Never skip OCR before Ban lock, during post-pick extra-ban window, or while pending streak
             if (
                 is_active_state
                 and has_locked_opp_ban
+                and not in_post_pick_ban_window
                 and not self._has_pending_verifications()
                 and self.prev_opp_small_blur is not None
                 and curr_opp_small_blur is not None
@@ -306,7 +330,7 @@ class DraftOcrScanner:
         ocr_my: list[Any] = []
         h_opp, w_opp = roi_opp_color.shape[:2] if roi_opp_color.ndim >= 2 else (0, 0)
 
-        if in_battle_five_picks:
+        if use_settle_lowres_mode:
             if h_opp > 0 and w_opp > 0:
                 if w_opp > 640:
                     scale = 640.0 / float(w_opp)
@@ -353,8 +377,15 @@ class DraftOcrScanner:
                     roi_my_color, (target_w_my, target_h_my), interpolation=my_interp
                 )
 
-            combined_roi = np.hstack((img_my_resized, img_opp_resized))
-            x_border = target_w_my
+            # Pad top & right border so top-edge Ban banners / far-right Ban cards never clip in DBNet
+            img_my_padded = cv2.copyMakeBorder(
+                img_my_resized, TOP_BAN_PAD_PX, 4, 4, 0, cv2.BORDER_REPLICATE
+            )
+            img_opp_padded = cv2.copyMakeBorder(
+                img_opp_resized, TOP_BAN_PAD_PX, 4, 0, TOP_BAN_PAD_PX, cv2.BORDER_REPLICATE
+            )
+            combined_roi = np.hstack((img_my_padded, img_opp_padded))
+            x_border = img_my_padded.shape[1]
 
             ocr_combined, _ = ocr_fn(combined_roi)
             raw_my: list[Any] = []

@@ -25,6 +25,7 @@ from onmyoji_helper.domain.public_demo_data import get_public_demo_bundle
 from onmyoji_helper.domain.shikigami_repository import ShikigamiRepository
 from onmyoji_helper.vision.draft_ocr_scanner import (
     DEFAULT_MIN_OCR_CONFIDENCE,
+    TOP_BAN_PAD_PX,
     DraftOcrScanner,
     compute_adaptive_opp_size,
 )
@@ -388,10 +389,10 @@ def test_draft_ocr_adaptive_resolution_scaling_and_1080p_localized_flip_motion()
     _, dict_map, multi_shorts, tags_db = get_public_demo_bundle()
     repo = ShikigamiRepository(tags_db=tags_db, full_to_short_map=dict_map, multi_char_shorts=multi_shorts)
 
-    seen_heights: list[int] = []
+    seen_shapes: list[tuple[int, int]] = []
 
     def fake_1080p_ocr(stitched: np.ndarray) -> tuple[list[Any], None]:
-        seen_heights.append(stitched.shape[0])
+        seen_shapes.append((int(stitched.shape[0]), int(stitched.shape[1])))
         opp_x = float(stitched.shape[1] - 120)
         return ([([[opp_x, 360.0], [opp_x + 80, 360.0], [opp_x + 80, 390.0], [opp_x, 390.0]], "八岐大蛇", 0.46)], None)
 
@@ -400,7 +401,8 @@ def test_draft_ocr_adaptive_resolution_scaling_and_1080p_localized_flip_motion()
     _, _, ran1 = scanner.scan_draft_rois(
         base_1080p, None, is_active_state=True, has_locked_opp_ban=True, in_battle_five_picks=False, now=1.0
     )
-    assert ran1 is True and seen_heights == [440]
+    expected_h = 440 + TOP_BAN_PAD_PX + 4
+    assert ran1 is True and seen_shapes[-1][0] == expected_h
 
     # Flip Pick 5 label in a small localized patch at y = 530..570 (0.49..0.53 * 1080) only 0.4s later!
     flip_1080p = base_1080p.copy()
@@ -410,3 +412,19 @@ def test_draft_ocr_adaptive_resolution_scaling_and_1080p_localized_flip_motion()
     )
     assert ran2 is True
     assert [r[1] for r in opp_res] == ["八岐大蛇"]
+
+    # 5. Post-5-Pick Extra-Ban ('加禁') window: stays at full dual-column resolution for 25s, then 640px settle mode
+    _, _, ran_post_ban = scanner.scan_draft_rois(
+        flip_1080p, None, is_active_state=True, has_locked_opp_ban=True, in_battle_five_picks=True, now=10.0
+    )
+    _, _, ran_post_ban_2 = scanner.scan_draft_rois(
+        flip_1080p, None, is_active_state=True, has_locked_opp_ban=True, in_battle_five_picks=True, now=15.0
+    )
+    assert ran_post_ban is True and ran_post_ban_2 is True
+    assert seen_shapes[-1][0] == expected_h and seen_shapes[-1][1] > 640
+
+    # After 25s post-pick extra-ban window expires (now=40.0 -> 30s elapsed), switches to 640px settle ROI
+    _, _, ran_settle = scanner.scan_draft_rois(
+        flip_1080p, None, is_active_state=True, has_locked_opp_ban=True, in_battle_five_picks=True, now=40.0
+    )
+    assert ran_settle is True and seen_shapes[-1][1] == 640

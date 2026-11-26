@@ -65,3 +65,44 @@ def test_affine_camera_pan_and_live_window_resize_rescaling() -> None:
     assert parser.baseline_w == 1704 and parser.baseline_h == 960
     assert all(v["alive"] for v in opp_res.values())
     assert all(v["alive"] for v in my_res.values())
+
+
+def test_enemy_edge_slots_perspective_zoom_and_dynamic_missing_edge_backfill() -> None:
+    parser = StateParser()
+    w, h = 1280, 720
+
+    # 1. Battle entry frame only detects middle 3 enemies (Slot 3, Slot 2, Slot 1); outer Slot 5 & Slot 4 occluded!
+    partial_boxes: list[dict[str, float | int]] = [
+        {"cls": 0, "cx": w * r, "cy": h * 0.30} for r in (0.57, 0.66, 0.75)
+    ]
+    _, opp_partial = parser.parse_frame(MY_DRAFT, OPP_DRAFT, partial_boxes, w, h, now=1.0)
+    assert opp_partial["Slot 3"]["alive"] and opp_partial["Slot 2"]["alive"] and opp_partial["Slot 1"]["alive"]
+    assert not opp_partial["Slot 5"]["alive"] and not opp_partial["Slot 4"]["alive"]
+
+    # 2a. Next frame: only 4 boxes visible — far-left Slot 5 appears at x=0.25*w while Slot 4 is still occluded
+    backfill_left_boxes: list[dict[str, float | int]] = [
+        {"cls": 0, "cx": w * r, "cy": h * 0.30} for r in (0.25, 0.57, 0.66, 0.75)
+    ]
+    _, opp_left_filled = parser.parse_frame(MY_DRAFT, OPP_DRAFT, backfill_left_boxes, w, h, now=1.2)
+    assert opp_left_filled["Slot 5"]["alive"] is True and opp_left_filled["Slot 5"]["pos"] != (0, 0)
+    assert not opp_left_filled["Slot 4"]["alive"]
+
+    # 2b. Following frame: Slot 2 briefly occluded while far-right Slot 4 appears at x=0.95*w (near action bar)
+    backfill_right_boxes: list[dict[str, float | int]] = [
+        {"cls": 0, "cx": w * r, "cy": h * 0.30} for r in (0.25, 0.57, 0.75, 0.95)
+    ]
+    _, opp_full = parser.parse_frame(MY_DRAFT, OPP_DRAFT, backfill_right_boxes, w, h, now=1.4)
+    assert all(v["alive"] and v["pos"] != (0, 0) for v in opp_full.values())
+    assert parser.is_opp_baseline_set is True
+
+    # 3. Camera push-in causes wider perspective spread on outer edge slots (-95px left, +20px right > old 0.06*w=76px!)
+    #    even when 1 middle unit (Slot 2) is past grace at t=6.0s -> outer edge slots MUST NOT drop!
+    zoomed_four_boxes: list[dict[str, float | int]] = [
+        {"cls": 0, "cx": w * 0.25 - 95.0, "cy": h * 0.29},
+        {"cls": 0, "cx": w * 0.57 - 18.0, "cy": h * 0.30},
+        {"cls": 0, "cx": w * 0.75 + 15.0, "cy": h * 0.30},
+        {"cls": 0, "cx": w * 0.95 + 20.0, "cy": h * 0.31},
+    ]
+    _, opp_zoomed = parser.parse_frame(MY_DRAFT, OPP_DRAFT, zoomed_four_boxes, w, h, now=6.0)
+    assert opp_zoomed["Slot 5"]["alive"] is True and opp_zoomed["Slot 5"]["pos"] != (0, 0)
+    assert opp_zoomed["Slot 4"]["alive"] is True and opp_zoomed["Slot 4"]["pos"] != (0, 0)

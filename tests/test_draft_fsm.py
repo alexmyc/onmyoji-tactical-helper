@@ -107,3 +107,41 @@ def test_vs_banner_lobby_and_combat_debuffs_never_reset_active_five_pick_match()
     lobby_snap, _ = fsm.step(_tok("名士"), [], SORTED_DICT, my_ban="禪", now=100.0, is_combat_active=False)
     assert lobby_snap.should_reset_battle is True
     assert lobby_snap.opp_draft == []
+
+
+def test_opening_ban_icon_only_reveal_and_post_five_pick_extra_ban() -> None:
+    fsm = DraftStateMachine()
+    # 1. Enter Ban countdown ('對方禁選中'), then on reveal frame banner disappears leaving only '封陽君' + graphical icon
+    fsm.step(_tok("18對方禁選中"), [], SORTED_DICT, my_ban="禪", now=5.0)
+    assert fsm.in_ban_waiting is True
+    ban_snap, _ = fsm.step(_tok("封陽君"), [], SORTED_DICT, my_ban="禪", now=6.0)
+    assert ban_snap.opp_ban == "封"
+    assert ban_snap.phase == DraftPhase.ACTIVE_DRAFT
+
+    # 2. Complete 5v5 picks
+    picks_opp = ["不知火", "鈴鹿御前", "須佐之男", "大夜摩天閻魔", "八岐大蛇"]
+    picks_my = ["須佐之男", "不知火", "荒骷髏", "鈴鹿御前", "八岐大蛇"]
+    for idx in range(5):
+        snap, _ = fsm.step(
+            _tok(*picks_opp[: idx + 1]),
+            _tok(*picks_my[: idx + 1]),
+            SORTED_DICT,
+            my_ban="禪",
+            now=10.0 + idx,
+        )
+    assert snap.just_completed_five_picks is True
+    # Polling interval stays fast (0.9s) during the post-5-pick '加禁' window!
+    assert fsm.get_recommended_poll_interval(now=18.0) == 0.9
+
+    # 3. Opponent locks Post-5-Pick Extra Ban ('加禁荒骷髏') while 5 picks are on board -> updates opp_ban without reset!
+    extra_snap, _ = fsm.step(
+        _tok("對方加禁", "荒骷髏", *picks_opp),
+        _tok(*picks_my),
+        SORTED_DICT,
+        my_ban="禪",
+        now=20.0,
+        is_combat_active=False,
+    )
+    assert extra_snap.should_reset_battle is False
+    assert extra_snap.opp_ban == "封+骷"
+    assert len(extra_snap.opp_draft) == 5

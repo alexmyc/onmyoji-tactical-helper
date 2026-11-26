@@ -1,8 +1,8 @@
 """Deterministic Ban/Pick Draft Finite-State Machine for Onmyoji Tactical Helper.
 
-Decouples pure drafting transition rules (Ban hard-gate, 1..5 sequential pick locking,
-rematch/settlement resets, and idle sleep timeouts) from Win32 screen capture and OCR,
-enabling 100% offline unit testing.
+Decouples pure drafting transition rules (Opening Ban hard-gate, 1..5 sequential pick locking,
+Post-5-Pick Extra Ban / '加禁' detection, rematch/settlement resets, and idle sleep timeouts)
+from Win32 screen capture and OCR, enabling 100% offline unit testing.
 """
 
 import logging
@@ -14,7 +14,8 @@ from onmyoji_helper.domain.models import DraftPhase, DraftSnapshot
 
 logger = logging.getLogger("OnmyojiHelper")
 
-BAN_KEYWORDS: tuple[str, ...] = ("禁", "禁選", "禁选", "禁用")
+BAN_KEYWORDS: tuple[str, ...] = ("禁", "禁選", "禁选", "禁用", "加禁", "已禁", "被禁")
+EXTRA_BAN_KEYWORDS: tuple[str, ...] = ("加禁", "額外禁", "额外禁")
 # Explicit multi-char Ban headers only (never bare '禁', which appears in combat debuffs like '禁療')
 BAN_RESET_KEYWORDS: tuple[str, ...] = ("禁選", "禁选", "禁用", "對方禁", "对方禁", "我方禁")
 QUEUE_KEYWORDS: tuple[str, ...] = ("配對中", "配对中", "匹配成功")
@@ -23,17 +24,20 @@ SETTLE_KEYWORDS: tuple[str, ...] = ("勝利", "失敗", "胜利", "失败")
 
 
 class DraftStateMachine:
-    """Manages Ban/Pick draft state transitions and enforces the strict Ban Hard Gate."""
+    """Manages Ban/Pick draft state transitions, Opening Ban, and Post-5-Pick Extra Ban ('加禁')."""
 
     IDLE_SLEEP_TIMEOUT: float = 25.0
     PARTIAL_DRAFT_TIMEOUT: float = 90.0
     POST_FIVE_PICK_LOBBY_GUARD_SEC: float = 45.0
-    POST_FIVE_PICK_BAN_GUARD_SEC: float = 12.0
+    POST_FIVE_PICK_BAN_GUARD_SEC: float = 25.0
+    POST_PICK_EXTRA_BAN_WINDOW_SEC: float = 25.0
 
     def __init__(self) -> None:
         """Initializes an empty draft state machine in `SLEEP` phase."""
         self.phase: DraftPhase = DraftPhase.SLEEP
         self.remembered_opp_ban: str | None = None
+        self.base_opp_ban: str | None = None
+        self.extra_opp_ban: str | None = None
         self.opp_draft: list[str] = []
         self.my_draft: list[str] = []
         self.has_triggered_five_picks: bool = False
@@ -47,6 +51,8 @@ class DraftStateMachine:
         """Clears all remembered Ban/Pick state and resets phase."""
         self.phase = target_phase
         self.remembered_opp_ban = None
+        self.base_opp_ban = None
+        self.extra_opp_ban = None
         self.opp_draft.clear()
         self.my_draft.clear()
         self.has_triggered_five_picks = False
@@ -63,9 +69,16 @@ class DraftStateMachine:
         ban_wait_sec: float = 0.9,
         active_sec: float = 1.3,
         in_battle_sec: float = 4.5,
+        now: float | None = None,
     ) -> float:
-        """Returns the adaptive OCR polling interval for the current FSM phase."""
+        """Returns the adaptive OCR polling interval (staying fast for 25s post-5-pick for '加禁')."""
+        now_ts = time.time() if now is None else float(now)
         if self.has_triggered_five_picks:
+            if (
+                self.five_picks_locked_time > 0.0
+                and (now_ts - self.five_picks_locked_time) < self.POST_PICK_EXTRA_BAN_WINDOW_SEC
+            ):
+                return ban_wait_sec
             return in_battle_sec
         if self.in_ban_waiting and not self.remembered_opp_ban:
             return ban_wait_sec
@@ -85,22 +98,7 @@ class DraftStateMachine:
         now: float | None = None,
         is_combat_active: bool = False,
     ) -> tuple[DraftSnapshot, bool]:
-        """Advances the draft FSM given OCR token results from opponent and ally columns.
-
-        Args:
-            ocr_opp: RapidOCR result tuples `(box, text, score)` from the opponent/header ROI.
-            ocr_my: RapidOCR result tuples `(box, text, score)` from the ally ROI.
-            sorted_full_to_short: Length-descending `(full_name, short_name)` alias pairs.
-            my_ban: Player's configured Ban short name for the active system.
-            now: Optional injectable timestamp for deterministic testing.
-            is_combat_active: True while 5v5 YOLOv8 combat tracking is actively running,
-                preventing VS-banner / rank-header keywords (`'名士'`, `'陰陽師'`) from resetting
-                an ongoing battle.
-
-        Returns:
-            Tuple `(DraftSnapshot, skip_ui_refresh)` where `skip_ui_refresh=True` when a
-            transient `"不能上"` tooltip occluded the draft column.
-        """
+        """Advances the draft FSM given OCR token results from opponent and ally columns."""
         now_ts = time.time() if now is None else float(now)
         should_reset_battle = False
         just_completed_five = False
@@ -111,6 +109,7 @@ class DraftStateMachine:
 
         if full_text_opp:
             has_ban_kw = any(kw in full_text_opp for kw in BAN_KEYWORDS)
+            has_extra_ban_kw = any(kw in full_text_opp for kw in EXTRA_BAN_KEYWORDS)
             has_explicit_ban_reset = any(kw in full_text_opp for kw in BAN_RESET_KEYWORDS)
 
             # 1. Explicit queue / rematch screens: reset any leftover partial/full draft
@@ -135,7 +134,7 @@ class DraftStateMachine:
                     if "匹配成功" in full_text_opp:
                         self.in_ban_waiting = True
 
-            # 2. Settlement screen (victory / defeat / early surrender) — check BEFORE lobby labels!
+            # 2. Settlement screen (victory / defeat / early surrender)
             elif any(kw in full_text_opp for kw in SETTLE_KEYWORDS):
                 had_state = bool(
                     self.remembered_opp_ban
@@ -199,31 +198,100 @@ class DraftStateMachine:
             if "不能上" in full_text_opp:
                 return self._make_snapshot(False, should_reset_battle), True
 
-            # New Ban phase starting right after an earlier match without lobby screen:
-            # Require explicit multi-char Ban header (NOT bare '禁' from '禁療') and post-5-pick guard!
-            if has_explicit_ban_reset and (
-                self.opp_draft or self.my_draft or self.has_triggered_five_picks
-            ):
-                allow_ban_reset = True
-                if self.has_triggered_five_picks and self.five_picks_locked_time > 0.0:
-                    allow_ban_reset = (
-                        now_ts - self.five_picks_locked_time
-                    ) >= self.POST_FIVE_PICK_BAN_GUARD_SEC
-                if allow_ban_reset:
-                    logger.info(
-                        f"🔄 [DraftFSM] 偵測到新對局禁選階段，重置上一場陣容 (OCR='{full_text_opp[:36]}')"
-                    )
-                    self.reset(DraftPhase.BAN_WAITING)
-                    self.last_wakeup_time = now_ts
-                    should_reset_battle = True
+            # Count how many already-drafted opponent picks remain visible on the draft board
+            visible_existing_picks = 0
+            if self.opp_draft:
+                seen_existing: set[str] = set()
+                for text in opp_texts:
+                    for full_name, short_name in sorted_full_to_short:
+                        if full_name in text and short_name in self.opp_draft:
+                            seen_existing.add(short_name)
+                            break
+                visible_existing_picks = len(seen_existing)
 
-            # Parse opponent Ban & 1..5 picks under the strict Ban Hard Gate
+            in_post_pick_ban_phase = bool(
+                (self.has_triggered_five_picks or len(self.opp_draft) >= 5)
+                and not is_combat_active
+                and (
+                    has_extra_ban_kw
+                    or visible_existing_picks >= 2
+                    or (
+                        self.five_picks_locked_time > 0.0
+                        and (now_ts - self.five_picks_locked_time) < self.POST_FIVE_PICK_BAN_GUARD_SEC
+                    )
+                )
+            )
+
+            # New Ban phase starting right after an earlier match (NEVER reset during Post-Pick '加禁'!)
+            if (
+                has_explicit_ban_reset
+                and not has_extra_ban_kw
+                and not in_post_pick_ban_phase
+                and (self.opp_draft or self.my_draft or self.has_triggered_five_picks)
+            ):
+                logger.info(
+                    f"🔄 [DraftFSM] 偵測到新對局禁選階段，重置上一場陣容 (OCR='{full_text_opp[:36]}')"
+                )
+                self.reset(DraftPhase.BAN_WAITING)
+                self.last_wakeup_time = now_ts
+                should_reset_battle = True
+
+            # Pre-scan matched shikigami tokens in opponent ROI for single-card Ban reveal handling
+            matched_opp_tokens: list[tuple[str, str]] = []
+            for text in opp_texts:
+                for full_name, short_name in sorted_full_to_short:
+                    if full_name in text and short_name:
+                        matched_opp_tokens.append((text, short_name))
+                        break
+
+            # A. Post-5-Pick Extra Ban ('加禁') detection: updates enemy Ban without wiping picks!
+            if in_post_pick_ban_phase and has_ban_kw and self.extra_opp_ban is None:
+                extra_candidate: tuple[str, str] | None = None
+                # Priority 1: text box explicitly tagged with a Ban/加禁 keyword (e.g. '加禁荒骷髏', '禁用不知火')
+                for raw_txt, short_name in matched_opp_tokens:
+                    if (
+                        any(bkw in raw_txt for bkw in BAN_KEYWORDS)
+                        and short_name != self.base_opp_ban
+                        and short_name != my_ban
+                    ):
+                        extra_candidate = (raw_txt, short_name)
+                        break
+                # Priority 2: newly revealed shikigami in Ban slot not belonging to the 5 existing opp_draft picks
+                if extra_candidate is None:
+                    for raw_txt, short_name in matched_opp_tokens:
+                        if (
+                            short_name not in self.opp_draft
+                            and short_name != self.base_opp_ban
+                            and short_name != my_ban
+                        ):
+                            extra_candidate = (raw_txt, short_name)
+                            break
+
+                if extra_candidate is not None:
+                    raw_txt, extra_short = extra_candidate
+                    self.extra_opp_ban = extra_short
+                    if self.base_opp_ban and self.base_opp_ban != extra_short:
+                        self.remembered_opp_ban = f"{self.base_opp_ban}+{extra_short}"
+                    else:
+                        self.remembered_opp_ban = extra_short
+                    logger.info(
+                        f"🚫 [DraftFSM] 偵測到敵方 5 選後加禁: {extra_short} "
+                        f"(敵方禁用='{self.remembered_opp_ban}', OCR原文='{raw_txt}')"
+                    )
+
+            # B. Opening Ban & 1..5 sequential picks
+            unique_opp_shorts = list(dict.fromkeys(sn for _, sn in matched_opp_tokens))
+            can_lock_from_ban_waiting = (
+                self.in_ban_waiting and not self.opp_draft and len(unique_opp_shorts) == 1
+            )
+
             for text in opp_texts:
                 if not self.remembered_opp_ban:
-                    if has_ban_kw:
+                    if has_ban_kw or can_lock_from_ban_waiting:
                         for full_name, short_name in sorted_full_to_short:
                             if full_name in text and short_name:
                                 self.remembered_opp_ban = short_name
+                                self.base_opp_ban = short_name
                                 self.in_ban_waiting = False
                                 self.phase = DraftPhase.ACTIVE_DRAFT
                                 self.last_draft_change_time = now_ts
@@ -235,9 +303,10 @@ class DraftStateMachine:
                 if self.remembered_opp_ban and len(self.opp_draft) < 5:
                     for full_name, short_name in sorted_full_to_short:
                         if full_name in text and short_name:
-                            if not any(bkw in full_text_opp for bkw in ("禁", "禁選", "禁选")):
+                            if not any(bkw in full_text_opp for bkw in ("禁", "禁選", "禁选", "禁用", "加禁")):
                                 if (
-                                    short_name != self.remembered_opp_ban
+                                    short_name != self.base_opp_ban
+                                    and short_name != self.remembered_opp_ban
                                     and short_name != my_ban
                                     and short_name not in self.opp_draft
                                 ):
@@ -254,7 +323,8 @@ class DraftStateMachine:
                 for full_name, short_name in sorted_full_to_short:
                     if full_name in text and short_name:
                         if (
-                            short_name != self.remembered_opp_ban
+                            short_name != self.base_opp_ban
+                            and short_name != self.remembered_opp_ban
                             and short_name != my_ban
                             and short_name not in self.my_draft
                         ):
