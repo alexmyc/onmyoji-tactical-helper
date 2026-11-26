@@ -279,7 +279,7 @@ def _draft_ocr_worker(
 
 
 def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parses runtime CLI flags (`--demo`, `--smoke-exit-ms`)."""
+    """Parses runtime CLI flags (`--demo`, `--smoke-check`, `--smoke-exit-ms`)."""
     parser = argparse.ArgumentParser(
         prog="run_app.py",
         description="Onmyoji Tactical Helper — Real-Time Multimodal Edge-AI Assistant",
@@ -288,6 +288,11 @@ def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--demo",
         action="store_true",
         help="Launch the offline interactive match sandbox (no game window, GPU, or .env needed).",
+    )
+    parser.add_argument(
+        "--smoke-check",
+        action="store_true",
+        help="Verify compiled modules, initialize the primary GUI window, and exit 0 after 300ms.",
     )
     parser.add_argument(
         "--smoke-exit-ms",
@@ -299,18 +304,44 @@ def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def _verify_smoke_check_imports(demo_mode: bool) -> None:
+    """Eagerly imports core & platform modules during `--smoke-check` so missing `.pyd` deps fail fast."""
+    import onmyoji_helper.decision.llm_engine  # noqa: F401
+    import onmyoji_helper.infra.auth_service  # noqa: F401
+    import onmyoji_helper.infra.sheets_sync_store  # noqa: F401
+    import onmyoji_helper.infra.win32_privilege  # noqa: F401
+    import onmyoji_helper.infra.win32_window as win_mod
+    import onmyoji_helper.ui.demo_sandbox  # noqa: F401
+    import onmyoji_helper.ui.hud_overlay  # noqa: F401
+    import onmyoji_helper.ui.main_window  # noqa: F401
+    import onmyoji_helper.ui.tactical_panel  # noqa: F401
+    import onmyoji_helper.vision.draft_ocr_scanner  # noqa: F401
+
+    if sys.platform == "win32" and getattr(sys, "frozen", False) and win_mod.win32gui is None:
+        raise ImportError("Frozen Windows executable is missing 'win32gui' in bundled runtime!")
+
+    if not demo_mode:
+        import onmyoji_helper.app.battle_coordinator  # noqa: F401
+        import onmyoji_helper.automation.battle_executor  # noqa: F401
+        import onmyoji_helper.infra.capture_engine  # noqa: F401
+        import onmyoji_helper.vision.action_bar_detector  # noqa: F401
+        import onmyoji_helper.vision.spatial_tracker  # noqa: F401
+        import onmyoji_helper.vision.turn_detector  # noqa: F401
+
+
 def run_application(argv: list[str] | None = None) -> None:
     """Primary application entrypoint called by `run_app.py`."""
     args = _parse_cli_args(argv)
+    smoke_check = bool(args.smoke_check)
     demo_mode = bool(args.demo) or has_demo_default_flag()
 
     configure_cpu_thread_env()
     enable_per_monitor_dpi_awareness()
-    if not demo_mode:
+    if not demo_mode and not smoke_check:
         load_dotenv_if_present()
 
-    has_private_cloud = (not demo_mode) and has_cloud_sheets_configured()
-    is_public_sandbox = demo_mode or (not has_private_cloud)
+    has_private_cloud = (not demo_mode) and (not smoke_check) and has_cloud_sheets_configured()
+    is_public_sandbox = demo_mode or smoke_check or (not has_private_cloud)
 
     if not is_public_sandbox:
         ensure_admin_privileges()
@@ -318,9 +349,12 @@ def run_application(argv: list[str] | None = None) -> None:
     cv2.setNumThreads(1)
     cv2.ocl.setUseOpenCL(False)
 
-    logger = setup_runtime_logger(install_hooks=True)
+    logger = setup_runtime_logger(install_hooks=(not smoke_check))
     set_below_normal_process_priority()
-    check_activation(demo_mode=demo_mode)
+    if smoke_check:
+        _verify_smoke_check_imports(demo_mode=demo_mode)
+    else:
+        check_activation(demo_mode=demo_mode)
 
     if not demo_mode and not has_private_cloud:
         print(
@@ -331,7 +365,7 @@ def run_application(argv: list[str] | None = None) -> None:
 
     try:
         systems, full_to_short_map, multi_char_shorts, tags_db = load_all_cached_bundle(
-            demo_mode=demo_mode
+            demo_mode=(demo_mode or smoke_check)
         )
         logger.info(
             f"✅ 資料庫啟動載入完成 (體系: {len(systems)} 套, 字典: {len(full_to_short_map)} 條, "
@@ -379,16 +413,20 @@ def run_application(argv: list[str] | None = None) -> None:
         sandbox_holder.clear()
         sandbox_holder.append(win)
 
-    if demo_mode:
+    if demo_mode or smoke_check:
         app = OnmyojiHelperUI(
             root,
             list(systems.keys()),
             mode_change_callback=None,
             sandbox_callback=open_or_focus_sandbox,
         )
-        logger.info("🧪 [Demo Mode] Interactive Match Sandbox launched (--demo).")
-        open_or_focus_sandbox()
-        if args.smoke_exit_ms > 0:
+        if demo_mode:
+            logger.info("🧪 [Demo Mode] Interactive Match Sandbox launched (--demo).")
+            open_or_focus_sandbox()
+        if smoke_check:
+            logger.info("[Smoke Check] All modules & MainWindow initialized; exiting cleanly in 300ms.")
+            root.after(300, root.destroy)
+        elif args.smoke_exit_ms > 0:
             sb = sandbox_holder[0]
             root.after(150, lambda: sb.apply_result(sb.controller.select_scenario(1)))
             root.after(300, lambda: sb.apply_result(sb.controller.select_scenario(2)))

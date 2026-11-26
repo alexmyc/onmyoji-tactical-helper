@@ -18,13 +18,17 @@ win32gui: Any = None
 win32process: Any = None
 
 if sys.platform == "win32":
-    import win32con as _win32con
-    import win32gui as _win32gui
-    import win32process as _win32process
+    try:
+        import win32con as _win32con
+        import win32gui as _win32gui
+        import win32process as _win32process
 
-    win32con = _win32con
-    win32gui = _win32gui
-    win32process = _win32process
+        win32con = _win32con
+        win32gui = _win32gui
+        win32process = _win32process
+    except ImportError as _win32_err:
+        logger.debug(f"[Win32Window] pywin32 modules unavailable ({_win32_err}); falling back to ctypes/no-op.")
+
     _user32 = ctypes.windll.user32
     _IS_64BIT = ctypes.sizeof(ctypes.c_void_p) == 8
     _LONG_PTR = ctypes.c_ssize_t if _IS_64BIT else ctypes.c_long
@@ -42,8 +46,8 @@ else:
 
 def get_root_hwnd(hwnd: int) -> int:
     """Returns the top-level GA_ROOT owner window handle for a given HWND."""
-    if not hwnd:
-        return 0
+    if not hwnd or win32gui is None or win32con is None:
+        return int(hwnd) if hwnd else 0
     try:
         root = win32gui.GetAncestor(hwnd, win32con.GA_ROOT)
         return int(root) if root else int(hwnd)
@@ -53,7 +57,7 @@ def get_root_hwnd(hwnd: int) -> int:
 
 def get_window_pid(hwnd: int) -> int:
     """Returns the Windows Process ID owning the given window handle."""
-    if not hwnd:
+    if not hwnd or win32process is None:
         return 0
     try:
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
@@ -64,7 +68,7 @@ def get_window_pid(hwnd: int) -> int:
 
 def get_window_title(hwnd: int) -> str:
     """Safely retrieves a window's title text."""
-    if not hwnd:
+    if not hwnd or win32gui is None:
         return ""
     try:
         return str(win32gui.GetWindowText(hwnd) or "")
@@ -83,7 +87,7 @@ def get_tk_win32_hwnd(tk_window: tk.Misc) -> int:
 
 def apply_extended_window_style(hwnd: int, style_flags: int, topmost: bool = True) -> None:
     """Overlays Win32 extended window styles (64-bit safe) without activating the window."""
-    if not hwnd or _get_window_long is None or _set_window_long is None:
+    if not hwnd or _get_window_long is None or _set_window_long is None or win32gui is None or win32con is None:
         return
     current_style = int(_get_window_long(hwnd, GWL_EXSTYLE))
     new_style = current_style | int(style_flags)
@@ -118,6 +122,8 @@ def focus_game_root_window(hwnd: int) -> bool:
     Windows forbids calling SetForegroundWindow directly on child render panes; this helper
     always resolves GA_ROOT first and uses AttachThreadInput fallback if needed.
     """
+    if not hwnd or win32gui is None or win32con is None or win32process is None:
+        return False
     try:
         root_hwnd = get_root_hwnd(hwnd)
         if (

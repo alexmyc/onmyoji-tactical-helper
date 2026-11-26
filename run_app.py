@@ -89,8 +89,8 @@ def _has_demo_default_flag() -> bool:
 
 
 def _should_skip_uac(argv: list[str]) -> bool:
-    """Skips Windows UAC prompt in `--demo`, `demo_default.flag`, `--help`, or Public Sandbox runs."""
-    if any(flag in argv for flag in ("--demo", "-h", "--help")) or _has_demo_default_flag():
+    """Skips Windows UAC prompt in `--demo`, `--smoke-check`, `demo_default.flag`, `--help`, or Sandbox runs."""
+    if any(flag in argv for flag in ("--demo", "--smoke-check", "-h", "--help")) or _has_demo_default_flag():
         return True
     return not _has_local_private_dotenv()
 

@@ -32,6 +32,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import sysconfig
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -138,7 +139,24 @@ PROFILES: dict[str, BuildProfileSpec] = {
 
 MENU_TO_PROFILE: dict[str, str] = {spec.menu_number: key for key, spec in PROFILES.items()}
 
-BASE_HIDDEN_IMPORTS: list[str] = [
+# Mandatory across ALL 4 profiles (`personal`, `hr-demo`, `friend-full`, `friend-lite`) because
+# Cython `.pyd` binaries hide Python-level imports from PyInstaller's static bytecode analyzer!
+COMMON_HIDDEN_IMPORTS: list[str] = [
+    "win32gui",
+    "win32con",
+    "win32process",
+    "win32api",
+    "win32ui",
+    "win32clipboard",
+    "pywintypes",
+    "pythoncom",
+    "winreg",
+    "pygetwindow",
+    "requests",
+    "urllib3",
+    "certifi",
+    "PIL",
+    "PIL.Image",
     "cv2",
     "numpy",
     "tkinter",
@@ -147,6 +165,10 @@ BASE_HIDDEN_IMPORTS: list[str] = [
     "argparse",
     "ctypes",
     "urllib.request",
+    "urllib.error",
+    "urllib.parse",
+    "http.client",
+    "ssl",
     "csv",
     "dataclasses",
     "enum",
@@ -165,21 +187,21 @@ BASE_HIDDEN_IMPORTS: list[str] = [
     "collections",
 ]
 
+# Required for all live combat / whitelist profiles (`personal`, `friend-full`, `friend-lite`)
 LIVE_COMBAT_HIDDEN_IMPORTS: list[str] = [
-    "PIL",
-    "PIL.Image",
-    "pygetwindow",
-    "win32gui",
-    "win32ui",
-    "win32con",
-    "win32api",
-    "win32process",
-    "winreg",
-    "pywintypes",
     "ultralytics",
+    "rapidocr_onnxruntime",
+    "onnxruntime",
     "torch",
     "torchvision",
+]
+
+LIVE_COMBAT_COLLECT_ALL: list[str] = [
+    "ultralytics",
     "rapidocr_onnxruntime",
+]
+
+LIVE_COMBAT_COLLECT_BINARIES: list[str] = [
     "onnxruntime",
 ]
 
@@ -587,25 +609,19 @@ def _compile_all_modules(
     return staged_results
 
 
-def _run_pyinstaller(
+def build_pyinstaller_command(
     project_root: str,
     stage_dir: str,
     work_dir: str,
-    dist_dir: str,
+    pyi_dist_holder: str,
+    staged_bootstrap: str,
     staged_pyds: list[tuple[str, str, str]],
     packages: list[str],
     spec: BuildProfileSpec,
-) -> str:
-    uac_desc = "--uac-admin" if spec.require_uac_admin else "standard-user (no UAC prompt)"
-    print(f"\n[STEP 3/6] Freezing {APP_NAME}.exe via PyInstaller (--onedir --windowed, {uac_desc})...")
-
-    staged_bootstrap = os.path.join(stage_dir, BOOTSTRAP_FILE)
-    shutil.copy2(os.path.join(project_root, BOOTSTRAP_FILE), staged_bootstrap)
-
-    # PyInstaller names the output folder after `--name`; build inside an isolated sub-dist folder
-    # so the executable is always named `OnmyojiHelper.exe` while the parent folder matches the profile!
-    pyi_dist_holder = os.path.join(work_dir, "_pyi_dist")
-    _remove_path_safe(pyi_dist_holder)
+    has_llama_cpp: bool | None = None,
+) -> list[str]:
+    """Constructs the complete PyInstaller CLI command with explicit `.pyd`-hidden dependencies."""
+    llama_installed = _is_module_available("llama_cpp") if has_llama_cpp is None else has_llama_cpp
 
     cmd: list[str] = [
         sys.executable,
@@ -626,9 +642,6 @@ def _run_pyinstaller(
     if spec.require_uac_admin:
         cmd.append("--uac-admin")
 
-    if not spec.exclude_heavy_cv_runtime:
-        cmd.append("--collect-all=rapidocr_onnxruntime")
-
     icon_path = os.path.join(project_root, ICON_FILE)
     if os.path.isfile(icon_path):
         cmd.append(f"--icon={icon_path}")
@@ -640,23 +653,69 @@ def _run_pyinstaller(
         cmd.append(f"--add-binary={pyd_path};{rel_dir_posix}")
         cmd.append(f"--hidden-import={dotted_mod}")
 
-    for dep in BASE_HIDDEN_IMPORTS:
-        cmd.append(f"--hidden-import={dep}")
+    # 1. Mandatory hidden imports & pywin32 DLLs across ALL 4 profiles
+    for dep in COMMON_HIDDEN_IMPORTS:
+        if _is_module_available(dep.split(".")[0]) or dep in sys.stdlib_module_names:
+            cmd.append(f"--hidden-import={dep}")
+    if _is_module_available("pywintypes"):
+        cmd.append("--collect-binaries=pywin32_system32")
+        purelib = sysconfig.get_paths().get("purelib", "")
+        pywin32_sys_dir = os.path.join(purelib, "pywin32_system32") if purelib else ""
+        if pywin32_sys_dir and os.path.isdir(pywin32_sys_dir):
+            for dll_name in sorted(os.listdir(pywin32_sys_dir)):
+                if dll_name.lower().endswith(".dll"):
+                    cmd.append(f"--add-binary={os.path.join(pywin32_sys_dir, dll_name)};.")
 
+    # 2. Profile-specific CV / OCR / LLM collection vs exclusion
     if spec.exclude_heavy_cv_runtime:
         for ex in HEAVY_RUNTIME_EXCLUDES:
             cmd.append(f"--exclude-module={ex}")
     else:
         for dep in LIVE_COMBAT_HIDDEN_IMPORTS:
             cmd.append(f"--hidden-import={dep}")
+        for pkg in LIVE_COMBAT_COLLECT_ALL:
+            cmd.append(f"--collect-all={pkg}")
+        for bin_pkg in LIVE_COMBAT_COLLECT_BINARIES:
+            cmd.append(f"--collect-binaries={bin_pkg}")
+
         if spec.exclude_llama_cpp:
             cmd.append("--exclude-module=llama_cpp")
-        elif _is_module_available("llama_cpp"):
+        elif llama_installed:
+            cmd.append("--hidden-import=llama_cpp")
             cmd.append("--collect-all=llama_cpp")
-        else:
-            print("   [INFO] llama_cpp not installed in build Python; omitting --collect-all=llama_cpp.")
 
     cmd.append(staged_bootstrap)
+    return cmd
+
+
+def _run_pyinstaller(
+    project_root: str,
+    stage_dir: str,
+    work_dir: str,
+    dist_dir: str,
+    staged_pyds: list[tuple[str, str, str]],
+    packages: list[str],
+    spec: BuildProfileSpec,
+) -> str:
+    uac_desc = "--uac-admin" if spec.require_uac_admin else "standard-user (no UAC prompt)"
+    print(f"\n[STEP 3/6] Freezing {APP_NAME}.exe via PyInstaller (--onedir --windowed, {uac_desc})...")
+
+    staged_bootstrap = os.path.join(stage_dir, BOOTSTRAP_FILE)
+    shutil.copy2(os.path.join(project_root, BOOTSTRAP_FILE), staged_bootstrap)
+
+    pyi_dist_holder = os.path.join(work_dir, "_pyi_dist")
+    _remove_path_safe(pyi_dist_holder)
+
+    cmd = build_pyinstaller_command(
+        project_root=project_root,
+        stage_dir=stage_dir,
+        work_dir=work_dir,
+        pyi_dist_holder=pyi_dist_holder,
+        staged_bootstrap=staged_bootstrap,
+        staged_pyds=staged_pyds,
+        packages=packages,
+        spec=spec,
+    )
 
     res = subprocess.run(cmd, cwd=stage_dir)
     if res.returncode != 0:
@@ -876,6 +935,46 @@ def _verify_release_integrity(
         abs_bundled_gguf = os.path.join(output_app_dir, bundled_rel_gguf.replace("/", os.sep))
         if not os.path.isfile(abs_bundled_gguf):
             raise AssertionError(f"Bundled GGUF file missing: {abs_bundled_gguf}")
+
+    # 5. Verify `win32gui` & `pywintypes` native binaries exist inside `data/` (`_internal/` equivalent)
+    win32gui_binaries: list[str] = []
+    pywintypes_dlls: list[str] = []
+    for r_dir, _, fnames in os.walk(data_dir):
+        for fn in fnames:
+            low_fn = fn.lower()
+            if low_fn.startswith("win32gui") and low_fn.endswith(".pyd"):
+                win32gui_binaries.append(os.path.join(r_dir, fn))
+            elif low_fn.startswith("pywintypes") and low_fn.endswith(".dll"):
+                pywintypes_dlls.append(os.path.join(r_dir, fn))
+
+    if not win32gui_binaries:
+        raise AssertionError(f"CRITICAL: win32gui*.pyd missing from bundled {CONTENTS_DIR_NAME}/ directory!")
+    if not pywintypes_dlls:
+        raise AssertionError(f"CRITICAL: pywintypes*.dll missing from bundled {CONTENTS_DIR_NAME}/ directory!")
+
+    # 6. Execute live `.exe --smoke-check` subprocess before allowing `.zip` packaging!
+    print(f"   [OK] Verified bundled pywin32 binaries ({os.path.basename(win32gui_binaries[0])}, {os.path.basename(pywintypes_dlls[0])})")
+    print(f"   [SMOKE] Launching {exe_name} --smoke-check to verify zero-crash startup...")
+    smoke_env = dict(os.environ)
+    smoke_env["__COMPAT_LAYER"] = "RunAsInvoker"
+    smoke_env["ONMYOJI_SKIP_UAC_FOR_TEST"] = "1"
+    smoke_res = subprocess.run(
+        [exe_path, "--smoke-check"],
+        cwd=output_app_dir,
+        env=smoke_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=35,
+        check=False,
+    )
+    if smoke_res.returncode != 0:
+        raise AssertionError(
+            f"Compiled {exe_name} --smoke-check failed with exit code {smoke_res.returncode}!\n"
+            f"STDOUT:\n{smoke_res.stdout}\nSTDERR:\n{smoke_res.stderr}"
+        )
+    print(f"   [OK] {exe_name} --smoke-check exited cleanly with code 0!")
 
     total_bytes = sum(
         os.path.getsize(os.path.join(r, fn))

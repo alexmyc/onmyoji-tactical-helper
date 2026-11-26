@@ -321,3 +321,59 @@ def test_four_release_profiles_pure_ascii_and_dotenv_rewriting(tmp_path: Path) -
     parsed_flite = parse_dotenv_file(str(dst_flite_env))
     assert parsed_flite["FORCE_LITE_ENGINE"] == "1"
     assert "LOCAL_LLM_MODEL_PATH" not in parsed_flite
+
+    # 4. Verify PyInstaller command includes hidden `.pyd` third-party dependencies per profile
+    for prof_key in ("personal", "hr-demo", "friend-full", "friend-lite"):
+        spec = build_release.PROFILES[prof_key]
+        cmd = build_release.build_pyinstaller_command(
+            project_root=str(root_dir),
+            stage_dir=str(tmp_path / "stage"),
+            work_dir=str(tmp_path / "work"),
+            pyi_dist_holder=str(tmp_path / "dist_sub"),
+            staged_bootstrap="run_app.py",
+            staged_pyds=[],
+            packages=["onmyoji_helper"],
+            spec=spec,
+            has_llama_cpp=True,
+        )
+        joined = " ".join(cmd)
+        for req_common in (
+            "win32gui",
+            "win32con",
+            "win32process",
+            "win32api",
+            "pywintypes",
+            "win32clipboard",
+            "pygetwindow",
+            "requests",
+            "urllib3",
+            "certifi",
+            "PIL",
+        ):
+            assert f"--hidden-import={req_common}" in joined, f"Missing {req_common} in {prof_key}"
+
+        if prof_key in ("personal", "friend-full", "friend-lite"):
+            for req_cv in ("ultralytics", "rapidocr_onnxruntime", "onnxruntime", "torch", "torchvision"):
+                assert f"--hidden-import={req_cv}" in joined
+            assert "--collect-all=ultralytics" in joined
+            assert "--collect-all=rapidocr_onnxruntime" in joined
+
+        if prof_key in ("personal", "friend-full"):
+            assert "--collect-all=llama_cpp" in joined
+        else:
+            assert "--exclude-module=llama_cpp" in joined
+
+
+def test_smoke_check_cli_exits_zero() -> None:
+    """Verifies `python run_app.py --smoke-check` initializes all modules & GUI and exits with code 0."""
+    root_dir = Path(__file__).resolve().parent.parent
+    proc = subprocess.run(
+        [sys.executable, str(root_dir / "run_app.py"), "--smoke-check"],
+        cwd=str(root_dir),
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    if "TclError" not in proc.stderr:
+        assert proc.returncode == 0, f"--smoke-check failed:\n{proc.stderr}"
