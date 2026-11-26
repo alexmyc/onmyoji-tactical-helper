@@ -331,6 +331,13 @@ def _verify_smoke_check_imports(demo_mode: bool) -> None:
 
 def run_application(argv: list[str] | None = None) -> None:
     """Primary application entrypoint called by `run_app.py`."""
+    for _stream in (sys.stdout, sys.stderr):
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
     args = _parse_cli_args(argv)
     smoke_check = bool(args.smoke_check)
     demo_mode = bool(args.demo) or has_demo_default_flag()
@@ -356,10 +363,10 @@ def run_application(argv: list[str] | None = None) -> None:
     else:
         check_activation(demo_mode=demo_mode)
 
-    if not demo_mode and not has_private_cloud:
+    if not demo_mode and not smoke_check and not has_private_cloud:
         print(
-            "[Public Sandbox Mode] No private .env detected — loaded built-in sample playbooks.\n"
-            "  -> Tip: Run 'python run_app.py --demo' or click '🧪 Interactive Demo Sandbox' "
+            "[Public Sandbox Mode] No private .env detected - loaded built-in sample playbooks.\n"
+            "  -> Tip: Run 'python run_app.py --demo' or click '[Offline Demo]' "
             "in the window to simulate live Ban/Pick & 5v5 combat!"
         )
 

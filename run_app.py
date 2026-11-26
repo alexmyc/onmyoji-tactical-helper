@@ -105,6 +105,13 @@ def _configure_import_path() -> None:
 
 
 if __name__ == "__main__":
+    for _stream in (sys.stdout, sys.stderr):
+        if _stream is not None and hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
     os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
     os.environ.setdefault("KMP_BLOCKTIME", "0")
     os.environ.setdefault("OMP_NUM_THREADS", "1")
