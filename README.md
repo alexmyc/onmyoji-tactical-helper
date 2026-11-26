@@ -47,7 +47,7 @@
 
 - **Mixed-DPI Coordinate Projection & Human-in-the-Loop Override Controls**
   - Shares a single physical coordinate projection (`project_cropped_to_physical_client`) across the click-through HUD (`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE`) and UI dispatch layer—maintaining 1:1 pixel alignment across `100% / 125% / 150% / 200%` DWM DPI scaling, `16:10` letterboxes, and negative-coordinate multi-monitor desktops.
-  - Implements **deterministic fail-safe guardrails**: smoothstep cursor interpolation with UI hover stabilization (`35–50 ms` `MOUSEEVENTF_MOVE` hover pulse for reliable hitbox registration), unified 2-step skill dispatch (`[unit lock] -> [skill cast]`) with automatic `S1` fallback on orb shortage, UIPI privilege-mismatch inspection, and **human-in-the-loop override controls** (`SafetyGuard` polls `F12` / `ESC` every `50 ms`, while `Win32Input` checks for `> 95 px` manual cursor takeover between interpolation steps).
+  - Implements **deterministic fail-safe guardrails**: smoothstep cursor interpolation with UI hover stabilization (`35–50 ms` `MOUSEEVENTF_MOVE` hover pulse + pre-click cursor re-anchoring), skill-first 2-step dispatch (`[skill button] -> 0.20–0.28s -> [target unit]`) with a `1.0–1.5s` post-decision settle buffer and `1.2–1.8s` unfinished-turn retry loop, automatic `S1` fallback on orb shortage, UIPI privilege-mismatch inspection, and **`< 50 ms` `F12` / `ESC` human-in-the-loop emergency downgrade controls**.
 
 - **Dual-Track Data Isolation & Credential-Free Default Packaging**
   - **Public Sandbox vs. Private Cloud Sync**: Public Sandbox Mode (`--demo` or default when `.env` is absent) bundles **27 curated sample aliases, 13 shikigami combat profiles, and 2 sample playbooks** (`public_demo_data.py`) for instant zero-config evaluation; configuring an untracked local `.env` dynamically syncs the full **1,128-entry alias dictionary and 251 shikigami tag profiles** from external Google Sheets.
@@ -155,7 +155,7 @@ Click the status indicator dot in the top-left corner of the main window to cycl
 
 - 🟢 **Green Mode (Draft Decision Support)** — Runs Ban/Pick OCR, XMind counter recommendations, and opponent predictions with **0 MB GPU VRAM** footprint.
 - 🟡 **Yellow Mode (Passive Visual HUD + Tactical Advisor — Primary Showcase)** — Loads `YOLOv8n` and Gemma-4 (or 0-VRAM rules) on 5v5 battle entry, rendering click-through (`WS_EX_TRANSPARENT | WS_EX_NOACTIVATE`) target lock rings, skill availability boxes, and live tactical advice with **zero input injection**.
-- 🔴 **Red Mode (Closed-Loop UI Automation Research)** — Studies closed-loop coordinate projection and 2-step UI dispatch (`[unit lock -> skill cast]`) with smooth cursor interpolation, UI hover stabilization, and `S1` orb-shortage fallback. Pressing **`F12`**, **`ESC`**, or moving the physical mouse (`> 95 px`) yields control back to passive Yellow Mode.
+- 🔴 **Red Mode (Closed-Loop UI Automation Research)** — Studies closed-loop coordinate projection and skill-first 2-step UI dispatch (`[skill button] -> 0.20–0.28s -> [target unit]`) with `1.0–1.5s` camera-settle buffering, `1.2–1.8s` unfinished-turn retries, and `S1` orb-shortage fallback. Pressing **`F12`** or **`ESC`** yields control back to passive Yellow Mode in `< 50 ms`.
 
 ---
 

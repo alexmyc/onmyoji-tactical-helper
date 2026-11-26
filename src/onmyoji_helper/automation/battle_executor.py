@@ -1,8 +1,14 @@
-"""Humanized Auto-Battle Executor for Onmyoji Tactical Helper (Red Mode).
+"""Auto-Battle Executor for Onmyoji Tactical Helper (Red Mode).
 
-Orchestrates 2-step Onmyoji turn execution (`[alive unit lock] -> [skill button click]`)
-across single-target, enemy AoE (`敵方全體`), and ally AoE (`我方全體`) skills, with graceful
-S1 normal-attack fallback, UIPI privilege checking, and `GA_ROOT` foreground gating.
+Executes Onmyoji combat turns in strict **Skill-First → Target-Second** order:
+1. Clicks the chosen skill button (`S1 / S2 / S3 / S4`).
+2. Pauses `0.20 ~ 0.28s` for the game UI to enter target-selection highlight mode.
+3. Clicks the resolved target unit coordinate (enemy single-target, ally single-target,
+   enemy AoE primary target, ally AoE center/alive unit, or active self unit).
+
+Pairs a `1.0 ~ 1.5s` post-decision settle buffer on turn entry with a `1.2 ~ 1.8s`
+automatic retry loop whenever the skill bar remains active (`TurnDetector.is_my_turn`),
+while preserving `< 50 ms` `F12` / `ESC` emergency downgrade controls.
 """
 
 import logging
@@ -31,24 +37,24 @@ logger = logging.getLogger("OnmyojiHelper")
 
 
 class AutoBattleExecutor:
-    """Executes humanized target-lock and skill-cast mouse actions in Red Mode."""
+    """Executes skill-first, target-second mouse dispatch with automatic unfinished-turn retries."""
 
     def __init__(
         self,
-        min_turn_cooldown: float = 2.2,
-        extra_turn_escape_sec: float = 5.5,
+        min_turn_cooldown: float = 1.2,
+        retry_cooldown_range: tuple[float, float] | None = (1.2, 1.8),
         target_jitter_px: float = 6.0,
         skill_jitter_px: float = 4.0,
-        reaction_delay_range: tuple[float, float] = (0.25, 0.50),
-        inter_click_delay_range: tuple[float, float] = (0.15, 0.28),
-        mouse_takeover_px: float = 95.0,
+        reaction_delay_range: tuple[float, float] = (1.0, 1.5),
+        inter_click_delay_range: tuple[float, float] = (0.20, 0.28),
+        mouse_takeover_px: float = 0.0,
         input_backend: Callable[[str, int, int], bool] | None = None,
         foreground_checker: Callable[[int], bool] | None = None,
         client_to_screen_fn: Callable[[int, int, int, int, int], MappedScreenPoint | None] | None = None,
         key_checker: Callable[[int], bool] | None = None,
         uipi_checker: Callable[[int], bool] | None = None,
     ) -> None:
-        """Initializes the auto-battle executor, safety guard, and coordinate mapper."""
+        """Initializes skill-first executor, `1.2~1.8s` retry guard, and DPI coordinate mapper."""
         self.target_jitter_px: float = float(target_jitter_px)
         self.skill_jitter_px: float = float(skill_jitter_px)
         self.reaction_delay_range: tuple[float, float] = reaction_delay_range
@@ -62,7 +68,7 @@ class AutoBattleExecutor:
         self.mapper: CoordinateMapper = CoordinateMapper(custom_mapper=client_to_screen_fn)
         self.safety: SafetyGuard = SafetyGuard(
             min_turn_cooldown=min_turn_cooldown,
-            extra_turn_escape_sec=extra_turn_escape_sec,
+            retry_cooldown_range=retry_cooldown_range,
             key_checker=key_checker,
         )
 
@@ -73,6 +79,10 @@ class AutoBattleExecutor:
     @property
     def emergency_stopped(self) -> bool:
         return self.safety.emergency_stopped
+
+    @property
+    def attempts_in_current_turn(self) -> int:
+        return self.safety.attempts_in_current_turn
 
     def reset_for_match(self) -> None:
         self.safety.reset_for_match()
@@ -164,7 +174,8 @@ class AutoBattleExecutor:
                     f"遊戲='{game_title}' (hwnd={hwnd}, root={game_root}, pid={game_pid})"
                 )
             return False
-        except Exception:
+        except Exception as exc:
+            logger.debug(f"[AutoExecutor] Foreground check skipped: {exc}")
             return False
 
     def map_image_to_screen(
@@ -180,7 +191,7 @@ class AutoBattleExecutor:
         return self.mapper.map_image_to_screen(hwnd, img_x, img_y, img_w, img_h, crop=crop)
 
     def _interruptible_sleep(self, duration: float, hwnd: int) -> bool:
-        """Sleeps in short slices while checking kill-switch, stop event, and foreground guard."""
+        """Sleeps in short slices while checking `F12` / `ESC` kill-switch and foreground guard."""
         if duration <= 0.0:
             return (
                 not self.poll_kill_switch_once()
@@ -197,7 +208,7 @@ class AutoBattleExecutor:
         return True
 
     def _humanized_click(self, hwnd: int, target_x: int, target_y: int) -> bool:
-        """Dispatches a humanized click via injectable test backend or Win32 SendInput."""
+        """Dispatches a smooth click via injectable test backend or Win32 SendInput."""
         if self.safety.stop_event.is_set() or self.poll_kill_switch_once():
             return False
         if not self.is_game_window_foreground(hwnd):
@@ -215,7 +226,11 @@ class AutoBattleExecutor:
                 or self.poll_kill_switch_once()
                 or not self.is_game_window_foreground(hwnd)
             ),
-            on_takeover_fn=lambda: self.trigger_emergency_stop("偵測到手動滑鼠接管"),
+            on_takeover_fn=(
+                (lambda: self.trigger_emergency_stop("偵測到手動滑鼠接管"))
+                if self.mouse_takeover_px > 0.0
+                else None
+            ),
         )
 
     @staticmethod
@@ -284,8 +299,9 @@ class AutoBattleExecutor:
         my_status: dict[str, dict[str, Any]],
         opp_status: dict[str, dict[str, Any]],
         crop: CropOffset | None = None,
+        skip_initial_reaction_sleep: bool = False,
     ) -> tuple[bool, str]:
-        """Executes one complete humanized Onmyoji turn: `[unit lock] -> [skill button]`."""
+        """Executes one complete Onmyoji turn in **Skill-First → Target-Second** order."""
         if not self.can_execute_this_turn():
             return False, ""
 
@@ -332,36 +348,37 @@ class AutoBattleExecutor:
             return False, "⚠️ [紅色全自動] 技能按鈕座標轉換失敗"
         skill_sx, skill_sy, win_bounds = skill_mapped
 
-        # Both single-target AND AoE (敵方全體 / 我方全體) perform 2-step [click alive unit -> click skill]
-        needs_target_click = (effective_scope != "自己") and (is_aoe_skill or effective_target_slot is not None)
-
+        # Resolve confirmation target across single-target, AoE (enemy/ally), and self scopes
+        pool = my_status if effective_scope == "自己" else (opp_status if effective_target_is_enemy else my_status)
+        picked_slot, picked_name, pos = self._pick_alive_slot(pool, preferred_slot=effective_target_slot)
         target_mapped: MappedScreenPoint | None = None
-        if needs_target_click:
-            pool = opp_status if effective_target_is_enemy else my_status
-            picked_slot, picked_name, pos = self._pick_alive_slot(pool, preferred_slot=effective_target_slot)
-            if picked_slot is not None and pos != (0, 0):
-                effective_target_slot = picked_slot
-                if not is_aoe_skill or not effective_target_name or "全體" in effective_target_name:
-                    effective_target_name = picked_name
-                target_mapped = self.map_image_to_screen(hwnd, pos[0], pos[1], img_w, img_h, crop=crop)
+        if picked_slot is not None and pos != (0, 0):
+            effective_target_slot = picked_slot
+            if not is_aoe_skill or not effective_target_name or "全體" in effective_target_name:
+                effective_target_name = picked_name
+            target_mapped = self.map_image_to_screen(hwnd, pos[0], pos[1], img_w, img_h, crop=crop)
 
-        reaction_sec = random.uniform(*self.reaction_delay_range)
-        if not self._interruptible_sleep(reaction_sec, hwnd):
-            return False, ""
-
-        if needs_target_click and target_mapped is not None:
-            tx, ty, t_bounds = target_mapped
-            jtx, jty = CoordinateMapper.apply_gaussian_jitter(tx, ty, self.target_jitter_px, t_bounds)
-            if not self._humanized_click(hwnd, jtx, jty):
+        attempt_num = self.attempts_in_current_turn
+        if attempt_num == 0 and not skip_initial_reaction_sleep:
+            reaction_sec = random.uniform(*self.reaction_delay_range)
+            if not self._interruptible_sleep(reaction_sec, hwnd):
                 return False, ""
 
+        # STEP 1: Click chosen Skill Button FIRST (S1 / S2 / S3 / S4)
+        jsx, jsy = CoordinateMapper.apply_gaussian_jitter(skill_sx, skill_sy, self.skill_jitter_px, win_bounds)
+        if not self._humanized_click(hwnd, jsx, jsy):
+            return False, ""
+
+        # STEP 2: Pause 0.20 ~ 0.28s for target-selection highlight, then click Target Unit SECOND
+        if target_mapped is not None:
             inter_sec = random.uniform(*self.inter_click_delay_range)
             if not self._interruptible_sleep(inter_sec, hwnd):
                 return False, ""
 
-        jsx, jsy = CoordinateMapper.apply_gaussian_jitter(skill_sx, skill_sy, self.skill_jitter_px, win_bounds)
-        if not self._humanized_click(hwnd, jsx, jsy):
-            return False, ""
+            tx, ty, t_bounds = target_mapped
+            jtx, jty = CoordinateMapper.apply_gaussian_jitter(tx, ty, self.target_jitter_px, t_bounds)
+            if not self._humanized_click(hwnd, jtx, jty):
+                return False, ""
 
         self.safety.mark_action_executed()
 
@@ -371,25 +388,30 @@ class AutoBattleExecutor:
             else "我方式神"
         )
         downgrade_tag = " (缺火/冷卻降級S1)" if downgraded else ""
+        retry_tag = f" [重試#{attempt_num}]" if attempt_num >= 1 else ""
         side_label = "敵方" if effective_target_is_enemy else "我方"
 
         if is_aoe_skill:
             aoe_label = "敵方全體" if effective_target_is_enemy else "我方全體"
             if effective_target_slot:
                 action_msg = (
-                    f"🤖 [紅色全自動] 已執行：{actor_label} {effective_skill}{downgrade_tag} "
+                    f"🤖 [紅色全自動]{retry_tag} 已執行：{actor_label} {effective_skill}{downgrade_tag} "
                     f"({aoe_label}) → {side_label} {effective_target_slot}"
                 )
             else:
-                action_msg = f"🤖 [紅色全自動] 已執行：{actor_label} {effective_skill}{downgrade_tag} → {aoe_label}"
-        elif needs_target_click and effective_target_slot:
+                action_msg = (
+                    f"🤖 [紅色全自動]{retry_tag} 已執行：{actor_label} {effective_skill}{downgrade_tag} → {aoe_label}"
+                )
+        elif effective_scope != "自己" and effective_target_slot:
             action_msg = (
-                f"🤖 [紅色全自動] 已執行：{actor_label} {effective_skill}{downgrade_tag}"
+                f"🤖 [紅色全自動]{retry_tag} 已執行：{actor_label} {effective_skill}{downgrade_tag}"
                 f" → {side_label} {effective_target_slot} ({effective_target_name})"
             )
         else:
             scope_label = effective_target_name or effective_scope or "自身"
-            action_msg = f"🤖 [紅色全自動] 已執行：{actor_label} {effective_skill}{downgrade_tag} → {scope_label}"
+            action_msg = (
+                f"🤖 [紅色全自動]{retry_tag} 已執行：{actor_label} {effective_skill}{downgrade_tag} → {scope_label}"
+            )
 
         logger.info(action_msg)
         return True, action_msg

@@ -113,36 +113,27 @@ def perform_humanized_click(
     abort_check_fn: Callable[[], bool],
     on_takeover_fn: Callable[[], None] | None = None,
 ) -> bool:
-    """Moves cursor along a smoothstep Bezier arc (DPI-exact) and dispatches a SendInput click.
+    """Interpolates cursor smoothly to `(target_x, target_y)`, stabilizes hover, and clicks.
 
-    Uses `SetCursorPos` for trajectory slices to prevent Windows mixed-DPI multi-monitor
-    `MOUSEEVENTF_VIRTUALDESK` coordinate drift, emits a 0-delta `MOUSEEVENTF_MOVE` hover
-    wake plus `0.035~0.050s` hover settle delay, and dispatches genuine `LEFTDOWN` / `LEFTUP`.
-
-    Args:
-        target_x: Destination physical screen X coordinate.
-        target_y: Destination physical screen Y coordinate.
-        mouse_takeover_px: Pixel threshold for detecting manual user mouse takeover.
-        abort_check_fn: Zero-arg callable returning True if execution must abort immediately.
-        on_takeover_fn: Optional callback invoked when manual mouse takeover is detected.
-
-    Returns:
-        True if the click completed cleanly, False if aborted or failed.
+    Tolerates minor accidental mouse bumps during the brief dispatch window (when
+    `mouse_takeover_px <= 0`, mouse micro-movements never abort or downgrade Red Mode, and
+    the cursor is re-anchored onto `(target_x, target_y)` right before `LEFTDOWN`), while
+    checking `abort_check_fn` (`F12` / `ESC` emergency brake) at every step.
     """
     if abort_check_fn():
         return False
 
     start_x, start_y = get_cursor_pos()
-    steps = random.randint(4, 6)
+    steps = random.randint(3, 5)
     dist = math.hypot(target_x - start_x, target_y - start_y)
-    arc_amp = min(14.0, dist * 0.05) * random.choice((-1.0, 1.0))
+    arc_amp = min(12.0, dist * 0.04) * random.choice((-1.0, 1.0))
 
     prev_actual_x, prev_actual_y = start_x, start_y
     for step_idx in range(1, steps + 1):
         if abort_check_fn():
             return False
 
-        if step_idx > 1:
+        if mouse_takeover_px > 0.0 and step_idx > 1:
             cur_x, cur_y = get_cursor_pos()
             if math.hypot(cur_x - prev_actual_x, cur_y - prev_actual_y) > mouse_takeover_px:
                 if callable(on_takeover_fn):
@@ -161,9 +152,9 @@ def perform_humanized_click(
             send_mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, abs_x, abs_y)
 
         prev_actual_x, prev_actual_y = get_cursor_pos()
-        time.sleep(random.uniform(0.008, 0.016))
+        time.sleep(random.uniform(0.007, 0.014))
 
-    # Final snap onto exact target pixel + hover wake + UI settle delay (0.035~0.050s)
+    # Snap onto exact target pixel + hover wake + UI settle delay (0.035~0.050s)
     if not set_cursor_pos(target_x, target_y):
         abs_tx, abs_ty = screen_to_absolute_mouse(target_x, target_y)
         send_mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, abs_tx, abs_ty)
@@ -173,8 +164,18 @@ def perform_humanized_click(
     if abort_check_fn():
         return False
 
+    # Re-anchor cursor if a slight wrist bump nudged the mouse during the 40ms hover settle
+    cur_fx, cur_fy = get_cursor_pos()
+    if math.hypot(cur_fx - target_x, cur_fy - target_y) > 3.0:
+        if not set_cursor_pos(target_x, target_y):
+            abs_tx, abs_ty = screen_to_absolute_mouse(target_x, target_y)
+            send_mouse_event(
+                MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, abs_tx, abs_ty
+            )
+        send_mouse_event(MOUSEEVENTF_MOVE, 0, 0)
+
     down_ok = send_mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0)
-    time.sleep(random.uniform(0.032, 0.055))
+    time.sleep(random.uniform(0.032, 0.050))
     up_ok = send_mouse_event(MOUSEEVENTF_LEFTUP, 0, 0)
     if not (down_ok and up_ok):
         logger.warning(

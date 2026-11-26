@@ -32,6 +32,33 @@ class ModelLifecycleManager:
 
         self.yolo_lock: threading.Lock = threading.Lock()
         self.llm_lock: threading.Lock = threading.Lock()
+        self._warmup_started: bool = False
+
+    def has_active_gpu_llm(self) -> bool:
+        """Returns True if local Gemma-4 GGUF is loaded and active."""
+        return bool(self.tactical_engine is not None and self.tactical_engine.llm is not None)
+
+    def warmup_in_background(self) -> None:
+        """Asynchronously pre-loads YOLOv8 (with 1x dummy kernel warmup) & TacticalEngine at startup."""
+        if self._warmup_started:
+            return
+        self._warmup_started = True
+
+        def _warmup_worker() -> None:
+            try:
+                ok = self.ensure_loaded()
+                if ok and self.yolo_model is not None:
+                    dummy = np.zeros((64, 64, 3), dtype=np.uint8)
+                    self.predict_yolo(dummy)
+                    logger.info("⚡ [ModelLifecycle] 背景預熱完成 (YOLOv8 + TacticalEngine 已就緒，切換黃/紅燈可秒開)。")
+            except Exception as exc:
+                logger.debug(f"[ModelLifecycle] Background warmup skipped: {exc}")
+
+        threading.Thread(
+            target=_warmup_worker,
+            name="ModelWarmupWorker",
+            daemon=True,
+        ).start()
 
     def ensure_loaded(self, should_abort_fn: Any | None = None) -> bool:
         """Lazily initializes YOLOv8 and TacticalEngine unless aborted.

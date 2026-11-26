@@ -31,8 +31,10 @@ class TurnDetector:
         self.is_turn_confirmed: bool = False
         self.lockout_end_time: float = 0.0
         self.locked_skill_mode: int | None = None
+        self._raw_turn_streak: int = 0
 
-        self.ACTIVATION_THRESHOLD: float = 0.40
+        self.ACTIVATION_THRESHOLD: float = 0.15
+        self.MIN_ACTIVATION_FRAMES: int = 2
         self.DEACTIVATION_GRACE: float = 0.15
 
         self._clahe: cv2.CLAHE = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
@@ -55,6 +57,7 @@ class TurnDetector:
         self._last_raw_turn = False
         self._last_eval_time = 0.0
         self._last_frame_seq = None
+        self._raw_turn_streak = 0
 
     def _verify_circle_ring_edge(
         self,
@@ -186,6 +189,7 @@ class TurnDetector:
 
         if current_time < self.lockout_end_time:
             self.turn_start_time = 0.0
+            self._raw_turn_streak = 0
             self.is_turn_confirmed = False
             self.locked_skill_mode = None
             return False
@@ -194,12 +198,17 @@ class TurnDetector:
 
         if raw_turn:
             self.turn_loss_time = 0.0
+            self._raw_turn_streak += 1
             if self.turn_start_time == 0.0:
                 self.turn_start_time = current_time
-            if (current_time - self.turn_start_time) >= self.ACTIVATION_THRESHOLD:
+            if (
+                self._raw_turn_streak >= self.MIN_ACTIVATION_FRAMES
+                and (current_time - self.turn_start_time) >= self.ACTIVATION_THRESHOLD
+            ):
                 self.is_turn_confirmed = True
         else:
             self.turn_start_time = 0.0
+            self._raw_turn_streak = 0
             if self.turn_loss_time == 0.0:
                 self.turn_loss_time = current_time
             if (

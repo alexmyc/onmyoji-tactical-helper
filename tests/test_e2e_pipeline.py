@@ -127,9 +127,9 @@ def test_end_to_end_synthetic_combat_pipeline(monkeypatch: pytest.MonkeyPatch) -
     crop = CropOffset(x0=0, y0=0, client_w=phys_w, client_h=phys_h)
     frame = _build_125dpi_logical_combat_frame(turn_detector, img_w, img_h)
 
-    # 1. TurnDetector geometric & HSV pass
+    # 1. TurnDetector geometric & HSV pass (0.15s + 2-frame debounce)
     assert turn_detector.is_my_turn(frame, frame_seq=1) is False
-    sim_clock[0] = 500.45
+    sim_clock[0] = 500.16
     is_my_turn = turn_detector.is_my_turn(frame, frame_seq=2)
     assert is_my_turn is True
     skill_mapping = turn_detector.get_skill_mapping(frame)

@@ -375,6 +375,8 @@ def run_application(argv: list[str] | None = None) -> None:
 
     root.after(200, _process_ui_queue, root, app, ui_queue)
 
+    tactical_mgr.models.warmup_in_background()
+
     worker_thread = threading.Thread(
         target=_draft_ocr_worker,
         args=(app, compiled_dbs, repository, mode_controller, tactical_mgr, ui_queue, logger),

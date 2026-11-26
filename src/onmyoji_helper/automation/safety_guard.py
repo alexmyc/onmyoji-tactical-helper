@@ -1,10 +1,13 @@
-"""Safety Guard & Turn Cooldown Lock Module for Onmyoji Tactical Helper (Red Mode).
+"""Safety Guard & Retry Cooldown Module for Onmyoji Tactical Helper (Red Mode).
 
-Manages the global `F12` / `ESC` emergency brake monitor thread, manual takeover stops,
-and the single-turn anti-spam cooldown state machine (`>= 2.2s` + `True -> False -> True`).
+Manages the global `50 ms` `F12` / `ESC` emergency brake monitor thread and the
+unfinished-turn `1.2 ~ 1.8s` automatic retry cadence (replacing long single-click lockouts
+so clicks swallowed by camera transitions or slight mouse bumps automatically retry until
+`TurnDetector` confirms the skill bar has closed).
 """
 
 import logging
+import random
 import threading
 import time
 from collections.abc import Callable
@@ -15,22 +18,23 @@ logger = logging.getLogger("OnmyojiHelper")
 
 
 class SafetyGuard:
-    """Enforces Red Mode emergency brakes and single-action-per-turn cooldown locks."""
+    """Enforces `F12` / `ESC` `< 50 ms` emergency brakes and `1.2 ~ 1.8s` retry pacing."""
 
     def __init__(
         self,
-        min_turn_cooldown: float = 2.2,
-        extra_turn_escape_sec: float = 5.5,
+        min_turn_cooldown: float = 1.2,
+        retry_cooldown_range: tuple[float, float] | None = (1.2, 1.8),
         key_checker: Callable[[int], bool] | None = None,
     ) -> None:
-        """Initializes cooldown thresholds, thread locks, and optional injectable key checker."""
-        self.min_turn_cooldown: float = max(2.2, float(min_turn_cooldown))
-        self.extra_turn_escape_sec: float = float(extra_turn_escape_sec)
+        """Initializes retry cooldown bounds, thread locks, and optional injectable key checker."""
+        self.min_turn_cooldown: float = max(0.01, float(min_turn_cooldown))
+        self.retry_cooldown_range: tuple[float, float] | None = retry_cooldown_range
         self._key_checker: Callable[[int], bool] = key_checker or is_vk_pressed
 
         self._lock: threading.Lock = threading.Lock()
         self._last_action_time: float = 0.0
-        self._waiting_for_turn_cycle: bool = False
+        self._current_cooldown_sec: float = self.min_turn_cooldown
+        self._attempts_in_current_turn: int = 0
         self._last_observed_my_turn: bool = False
         self._emergency_stopped: bool = False
         self._emergency_reason: str = ""
@@ -45,11 +49,18 @@ class SafetyGuard:
         """Returns True if an emergency brake has been triggered in the current session."""
         return self._emergency_stopped
 
+    @property
+    def attempts_in_current_turn(self) -> int:
+        """Returns how many cast attempts have executed during the current uninterrupted turn."""
+        with self._lock:
+            return self._attempts_in_current_turn
+
     def reset_for_match(self) -> None:
-        """Resets all per-turn cooldown locks and emergency stop flags for a new session."""
+        """Resets retry counters, cooldown timers, and emergency stop flags for a new session."""
         with self._lock:
             self._last_action_time = 0.0
-            self._waiting_for_turn_cycle = False
+            self._current_cooldown_sec = self.min_turn_cooldown
+            self._attempts_in_current_turn = 0
             self._last_observed_my_turn = False
             self._emergency_stopped = False
             self._emergency_reason = ""
@@ -60,14 +71,14 @@ class SafetyGuard:
         self.stop_event.set()
         self.stop_kill_switch_monitor()
         with self._lock:
-            self._waiting_for_turn_cycle = False
+            self._attempts_in_current_turn = 0
             self._last_action_time = 0.0
 
     def start_kill_switch_monitor(
         self,
         on_emergency_stop: Callable[[str], None] | None = None,
     ) -> None:
-        """Starts the low-CPU global F12/ESC emergency kill-switch daemon thread."""
+        """Starts the low-CPU global `50 ms` `F12` / `ESC` emergency kill-switch daemon thread."""
         self._on_emergency_callback = on_emergency_stop
         self._emergency_stopped = False
         self._emergency_reason = ""
@@ -109,7 +120,7 @@ class SafetyGuard:
                     logger.warning(f"⚠️ [AutoExecutor] 緊急煞車回呼異常: {exc}")
 
     def poll_kill_switch_once(self) -> bool:
-        """Polls F12 and ESC state once; triggers emergency stop if either is held."""
+        """Polls `F12` and `ESC` state once; triggers emergency stop if either is held."""
         if self._emergency_stopped:
             return True
         if self._key_checker(VK_F12):
@@ -127,29 +138,37 @@ class SafetyGuard:
             time.sleep(0.05)
 
     def observe_turn_state(self, is_my_turn: bool) -> None:
-        """Unlocks the turn-cycle latch once `is_my_turn` transitions `True -> False`."""
+        """Resets per-turn retry counter once `is_my_turn` transitions `True -> False`."""
         with self._lock:
             if not is_my_turn:
-                self._waiting_for_turn_cycle = False
+                self._attempts_in_current_turn = 0
+                self._last_action_time = 0.0
             self._last_observed_my_turn = bool(is_my_turn)
 
     def can_execute_this_turn(self, now: float | None = None) -> bool:
-        """Checks whether a new turn action is permitted under cooldown and turn-cycle locks."""
+        """Returns True if ready for initial cast or if `1.2 ~ 1.8s` retry window has elapsed."""
         now_ts = time.time() if now is None else float(now)
         if self._emergency_stopped or self.stop_event.is_set():
             return False
 
         with self._lock:
-            elapsed = now_ts - self._last_action_time
-            if self._last_action_time > 0.0 and elapsed < self.min_turn_cooldown:
-                return False
-            if self._waiting_for_turn_cycle and elapsed < self.extra_turn_escape_sec:
-                return False
+            if self._last_action_time > 0.0:
+                elapsed = now_ts - self._last_action_time
+                if elapsed < self._current_cooldown_sec:
+                    return False
             return True
 
     def mark_action_executed(self, now: float | None = None) -> None:
-        """Latches the turn cooldown lock right after a skill click completes."""
+        """Records cast completion and arms a `1.2 ~ 1.8s` retry cooldown window."""
         now_ts = time.time() if now is None else float(now)
         with self._lock:
             self._last_action_time = now_ts
-            self._waiting_for_turn_cycle = True
+            self._attempts_in_current_turn += 1
+            if self.retry_cooldown_range is not None:
+                lo, hi = self.retry_cooldown_range
+                self._current_cooldown_sec = max(
+                    self.min_turn_cooldown,
+                    random.uniform(min(lo, hi), max(lo, hi)),
+                )
+            else:
+                self._current_cooldown_sec = self.min_turn_cooldown

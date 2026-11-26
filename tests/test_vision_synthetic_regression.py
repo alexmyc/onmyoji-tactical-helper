@@ -76,7 +76,8 @@ def test_turn_detector_3skill_and_4skill_ring_sobel_and_hsv_replay(
     )
 
     assert detector.is_my_turn(frame_3skill, frame_seq=1) is False
-    sim_clock[0] = 100.45
+    # 0.15s debounce boundary + 2nd frame confirms turn rapidly
+    sim_clock[0] = 100.16
     assert detector.is_my_turn(frame_3skill, frame_seq=2) is True
 
     mapping_3 = detector.get_skill_mapping(frame_3skill)
@@ -98,7 +99,7 @@ def test_turn_detector_3skill_and_4skill_ring_sobel_and_hsv_replay(
     )
     sim_clock[0] = 102.00
     assert detector.is_my_turn(frame_4skill, frame_seq=10) is False
-    sim_clock[0] = 102.45
+    sim_clock[0] = 102.16
     assert detector.is_my_turn(frame_4skill, frame_seq=11) is True
 
     mapping_4 = detector.get_skill_mapping(frame_4skill)
