@@ -71,11 +71,13 @@ class OnmyojiHelperUI:
         self.root.attributes("-alpha", 1.0)
 
         window_width: int = 520
-        window_height: int = 545 if self.sandbox_callback is not None else 500
+        window_height: int = 535 if self.sandbox_callback is not None else 500
         screen_width: int = self.root.winfo_screenwidth()
         pos_x: int = screen_width - window_width - 50
         pos_y: int = 100
         self.root.geometry(f"{window_width}x{window_height}+{pos_x}+{pos_y}")
+        self.root.minsize(window_width, window_height)
+        self.root.maxsize(window_width, window_height)
         self.root.resizable(False, False)
 
         self.current_mode: str = OperatingMode.GREEN.value
@@ -142,6 +144,8 @@ class OnmyojiHelperUI:
             indicatoron=False,
             cursor="hand2",
             font=self.title_font,
+            width=14,
+            anchor="w",
         )
         self.ban_menu["menu"].config(
             bg=t.menu_bg, fg=t.text_primary, bd=0, relief="flat", font=self.title_font
@@ -206,7 +210,7 @@ class OnmyojiHelperUI:
         if self.sandbox_callback is not None:
             self.btn_sandbox = tk.Button(
                 bottom_frame,
-                text="🧪 Interactive Demo Sandbox (--demo)",
+                text="🧪 Offline Demo",
                 bg="#1F4E79",
                 fg=t.text_primary,
                 font=self.normal_font,
@@ -238,7 +242,9 @@ class OnmyojiHelperUI:
             bg=t.bg_color,
             fg=t.text_dim,
             font=self.normal_font,
-            wraplength=450,
+            width=42,
+            wraplength=440,
+            justify="center",
         )
         self.lbl_status.pack()
 

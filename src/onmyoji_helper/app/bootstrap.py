@@ -28,6 +28,7 @@ from onmyoji_helper.domain.shikigami_repository import ShikigamiRepository
 from onmyoji_helper.infra.auth_service import check_activation
 from onmyoji_helper.infra.env_loader import load_dotenv_if_present
 from onmyoji_helper.infra.logger_setup import setup_runtime_logger
+from onmyoji_helper.infra.paths import has_demo_default_flag
 from onmyoji_helper.infra.sheets_sync_store import (
     has_cloud_sheets_configured,
     load_all_cached_bundle,
@@ -301,13 +302,14 @@ def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
 def run_application(argv: list[str] | None = None) -> None:
     """Primary application entrypoint called by `run_app.py`."""
     args = _parse_cli_args(argv)
-    demo_mode = bool(args.demo)
+    demo_mode = bool(args.demo) or has_demo_default_flag()
 
     configure_cpu_thread_env()
     enable_per_monitor_dpi_awareness()
-    load_dotenv_if_present()
+    if not demo_mode:
+        load_dotenv_if_present()
 
-    has_private_cloud = has_cloud_sheets_configured()
+    has_private_cloud = (not demo_mode) and has_cloud_sheets_configured()
     is_public_sandbox = demo_mode or (not has_private_cloud)
 
     if not is_public_sandbox:
@@ -413,9 +415,7 @@ def run_application(argv: list[str] | None = None) -> None:
     mode_controller.set_ui_app(app)
 
     if is_public_sandbox:
-        app.lbl_status.config(
-            text="Public Sandbox Ready — Click [🧪 Interactive Demo Sandbox] or run --demo"
-        )
+        app.lbl_status.config(text="Offline Demo Ready — Click [Offline Demo]")
 
     root.after(200, _process_ui_queue, root, app, ui_queue)
 

@@ -51,9 +51,27 @@ def resolve_asset_path(filename: str, extra_dir: str = "") -> str:
     return candidates[0] if candidates else os.path.join(base_dir, filename)
 
 
+DEMO_DEFAULT_FLAG_FILE: str = "demo_default.flag"
+
+
 def get_appdata_cache_path(filename: str = "cache_db.enc") -> str:
     """Returns the %APPDATA%/OnmyojiHelper path for encrypted local cache persistence."""
     appdata = os.getenv("APPDATA", "") or os.path.expanduser("~")
     target_dir = os.path.join(appdata, "OnmyojiHelper")
     os.makedirs(target_dir, exist_ok=True)
     return os.path.join(target_dir, filename)
+
+
+def has_demo_default_flag(base_dir: str | None = None) -> bool:
+    """Returns True when `data/demo_default.flag` is bundled (HR / Recruiter Demo Edition)."""
+    if os.environ.get("ONMYOJI_IGNORE_DEMO_FLAG") == "1":
+        return False
+    root = os.path.abspath(base_dir) if base_dir else get_app_base_dir()
+    candidates = [
+        os.path.join(root, "data", DEMO_DEFAULT_FLAG_FILE),
+        os.path.join(root, DEMO_DEFAULT_FLAG_FILE),
+    ]
+    meipass_dir = getattr(sys, "_MEIPASS", None)
+    if meipass_dir and base_dir is None:
+        candidates.insert(0, os.path.join(os.path.abspath(meipass_dir), DEMO_DEFAULT_FLAG_FILE))
+    return any(os.path.isfile(p) for p in candidates)

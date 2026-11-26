@@ -38,6 +38,12 @@ def setup_runtime_logger(
     Returns:
         Configured application logger instance.
     """
+    env_level_name = os.environ.get("ONMYOJI_LOG_LEVEL", "").strip().upper()
+    if env_level_name == "WARN":
+        env_level_name = "WARNING"
+    if env_level_name in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+        log_level = int(getattr(logging, env_level_name))
+
     if not os.path.isabs(log_dir):
         log_dir = os.path.join(get_app_base_dir(), log_dir)
 

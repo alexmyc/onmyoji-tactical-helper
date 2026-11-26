@@ -510,7 +510,7 @@ class DemoSandboxController:
             my_draft=list(case["my_draft"]),
             my_recs=["【武運亨通，旗開得勝】"],
             opp_preds=[],
-            status_text=f"5v5 Combat Sim · {case['active_name']} → [{chosen_skill}] → {target_name}",
+            status_text=f"Offline Demo · {case['active_name']} → [{chosen_skill}] → {target_name}",
             mode=str(case["mode"]),
             tactical_advice=advice_text,
         )
@@ -540,20 +540,20 @@ class DemoSandboxWindow:
         self.window.attributes("-topmost", True)
         self.window.resizable(False, False)
 
-        # Position MainWindow (top-right), AITacticalUI (bottom-right), and Sandbox (top-left/center)
+        # Position MainWindow (top-right), AITacticalUI (bottom-right), and Offline Demo (top-left/center)
         screen_w = self.root.winfo_screenwidth()
         right_x = max(580, screen_w - 555)
-        self.root.geometry(f"520x545+{right_x}+40")
+        self.root.geometry(f"520x535+{right_x}+40")
         if self.demo_mode:
-            self.root.title("Onmyoji Tactical Helper — Live Draft & Mode View (--demo)")
+            self.root.title("Onmyoji Helper — Offline Demo")
 
         self.ai_panel: AITacticalUI = AITacticalUI(
             self.root,
             close_callback=self._on_ai_panel_closed,
         )
         if self.demo_mode:
-            self.ai_panel.window.title("AI Tactical Advisor — Live Telemetry (--demo)")
-        self.ai_panel.window.geometry(f"520x310+{right_x}+605")
+            self.ai_panel.window.title("AI Tactical Advisor — Offline Demo")
+        self.ai_panel.window.geometry(f"520x310+{right_x}+595")
 
         left_x = max(25, right_x - 600)
         self.window.geometry(f"575x650+{left_x}+40")

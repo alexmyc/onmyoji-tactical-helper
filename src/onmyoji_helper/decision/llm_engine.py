@@ -11,19 +11,62 @@ import logging
 import os
 from typing import Any
 
-from onmyoji_helper.infra.paths import resolve_asset_path
+from onmyoji_helper.infra.env_loader import get_clean_env
+from onmyoji_helper.infra.paths import get_app_base_dir, resolve_asset_path
 
 logger = logging.getLogger("OnmyojiHelper")
 
 VALID_SLOTS = frozenset({"Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5"})
 VALID_SKILLS = frozenset({"S1", "S2", "S3", "S4"})
+_TRUTHY_FLAGS = frozenset({"1", "true", "yes", "on"})
+
+
+def is_force_lite_engine() -> bool:
+    """Returns True when `FORCE_LITE_ENGINE=1` or `FORCE_RULE_MODE=1` disables local LLM & CUDA probes."""
+    lite_val = (os.getenv("FORCE_LITE_ENGINE") or get_clean_env("FORCE_LITE_ENGINE")).strip().lower()
+    rule_val = (os.getenv("FORCE_RULE_MODE") or get_clean_env("FORCE_RULE_MODE")).strip().lower()
+    return lite_val in _TRUTHY_FLAGS or rule_val in _TRUTHY_FLAGS
+
+
+def resolve_configured_gguf_path(default_filename: str, extra_dir: str = "") -> str | None:
+    """Resolves `LOCAL_LLM_MODEL_PATH` (relative to app base or absolute) or standard GGUF filenames."""
+    configured = (os.getenv("LOCAL_LLM_MODEL_PATH") or get_clean_env("LOCAL_LLM_MODEL_PATH")).strip()
+    base_dir = get_app_base_dir()
+    candidates: list[str] = []
+
+    if configured:
+        norm_cfg = configured.replace("/", os.sep).replace("\\", os.sep)
+        if os.path.isabs(norm_cfg):
+            candidates.append(norm_cfg)
+        else:
+            candidates.append(os.path.join(base_dir, norm_cfg))
+            candidates.append(resolve_asset_path(norm_cfg, extra_dir=extra_dir))
+            candidates.append(
+                resolve_asset_path(
+                    os.path.basename(norm_cfg),
+                    extra_dir=os.path.join(base_dir, "data", "models"),
+                )
+            )
+
+    models_sub_dir = os.path.join(base_dir, "data", "models")
+    candidates.append(resolve_asset_path(default_filename, extra_dir=extra_dir or models_sub_dir))
+    candidates.append(resolve_asset_path("mini_llm.gguf", extra_dir=extra_dir or models_sub_dir))
+
+    if os.path.isdir(models_sub_dir):
+        for fname in sorted(os.listdir(models_sub_dir)):
+            if fname.lower().endswith(".gguf"):
+                candidates.append(os.path.join(models_sub_dir, fname))
+
+    for cand in candidates:
+        if cand and os.path.isfile(cand):
+            return cand
+    return None
 
 
 def evaluate_hardware_tier() -> tuple[str, bool, str]:
     """Evaluates host RAM and NVIDIA CUDA VRAM to select GPU LLM vs. 0-VRAM Rule tier."""
-    force_rule = os.getenv("FORCE_RULE_MODE", "0").lower() in ("1", "true", "yes")
-    if force_rule:
-        return "輕量規則模式 (手動強制)", False, "使用者設置環境變數 FORCE_RULE_MODE=1"
+    if is_force_lite_engine():
+        return "輕量規則模式 (FORCE_LITE_ENGINE=1)", False, "已啟用 FORCE_LITE_ENGINE=1，跳過 LLM 與 CUDA 偵測"
 
     total_ram_gb = 8.0
     try:
@@ -89,9 +132,13 @@ class TacticalEngine:
         self._init_llm()
 
     def _init_llm(self) -> None:
-        if self.force_rule_only:
+        if self.force_rule_only or is_force_lite_engine():
             self.llm = None
-            self.device_mode = "輕量規則模式 (Sandbox Instant)"
+            self.device_mode = (
+                "輕量規則模式 (Sandbox Instant)"
+                if self.force_rule_only
+                else "輕量規則模式 (FORCE_LITE_ENGINE=1)"
+            )
             return
         _, can_load_llm, reason = evaluate_hardware_tier()
         if not can_load_llm:
@@ -100,13 +147,7 @@ class TacticalEngine:
             logger.info(f"⚡ [Hardware Tier] 已啟動【輕量規則模式】：{reason}。以 0 顯存與零延遲提供精確戰術指示。")
             return
 
-        primary_candidate = resolve_asset_path(self.model_filename, extra_dir=self.model_dir)
-        fallback_candidate = resolve_asset_path("mini_llm.gguf", extra_dir=self.model_dir)
-        model_path: str | None = None
-        for candidate in (primary_candidate, fallback_candidate):
-            if os.path.isfile(candidate):
-                model_path = candidate
-                break
+        model_path = resolve_configured_gguf_path(self.model_filename, extra_dir=self.model_dir)
 
         if not model_path:
             self.llm = None

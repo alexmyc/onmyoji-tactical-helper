@@ -75,9 +75,22 @@ def _has_local_private_dotenv() -> bool:
     )
 
 
+def _has_demo_default_flag() -> bool:
+    """Returns True when `data/demo_default.flag` is present (HR / Recruiter Demo Edition)."""
+    if os.environ.get("ONMYOJI_IGNORE_DEMO_FLAG") == "1":
+        return False
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.isfile(os.path.join(base, "data", "demo_default.flag")) or os.path.isfile(
+        os.path.join(base, "demo_default.flag")
+    )
+
+
 def _should_skip_uac(argv: list[str]) -> bool:
-    """Skips Windows UAC prompt in `--demo`, `--help`, or zero-config Public Sandbox runs."""
-    if any(flag in argv for flag in ("--demo", "-h", "--help")):
+    """Skips Windows UAC prompt in `--demo`, `demo_default.flag`, `--help`, or Public Sandbox runs."""
+    if any(flag in argv for flag in ("--demo", "-h", "--help")) or _has_demo_default_flag():
         return True
     return not _has_local_private_dotenv()
 

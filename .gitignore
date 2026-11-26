@@ -18,6 +18,7 @@ __pycache__/
 # Distribution / PyInstaller / Cython staging
 build/
 dist/
+*.zip
 _cython_tmp/
 _release_stage/
 _pyinstaller_work/

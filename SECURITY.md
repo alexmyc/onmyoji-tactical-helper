@@ -20,9 +20,9 @@ To allow frictionless technical evaluation without risking accidental exposure o
 1. **Zero Tracked Secrets in Source Control**:
    - Local `.env` files, neural model weight binaries (`*.pt`, `*.gguf`), runtime logs (`logs/`), and build artifacts (`dist/`, `build/`) are strictly excluded via `.gitignore`.
    - Only the sanitized configuration template ([.env.example](.env.example)), containing empty keys, is tracked in Git.
-2. **Credential-Free Default Packaging (`build_release.py`)**:
-   - Running `python build_release.py` (default public packaging mode) bundles `.env.example` only and **never** copies a local `.env` into `dist/OnmyojiHelper/data/`.
-   - Private cloud configuration is included **only** when the operator explicitly passes `--include-local-env` for a personal local build, enforced by an automated post-build hygiene audit before completion.
+2. **Credential-Free Default & HR Demo Packaging (`build_release.py`)**:
+   - Running `python build_release.py` (default non-interactive mode or `--profile hr-demo`) bundles `.env.example` only, writes `data/demo_default.flag`, and **never** copies a local `.env` into `dist/OnmyojiHelper_HR_Demo/data/`.
+   - Private cloud configuration is included **only** when the operator explicitly selects an authenticated private profile (`--profile personal | friend-full | friend-lite`), enforced by an automated post-build hygiene audit before completion.
 3. **Public Sandbox Fallback (`--demo` & Zero-Config Startup)**:
    - When `.env` is absent or `--demo` is supplied, `EnvLoader`, `AuthService`, and `SheetsSyncStore` bypass all external network requests and Windows UAC elevation prompts, operating 100% offline against the built-in sample dataset (`src/onmyoji_helper/domain/public_demo_data.py`).
 4. **Local Cache Obfuscation**:

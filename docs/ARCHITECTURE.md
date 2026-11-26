@@ -154,11 +154,15 @@ Screen coordinates are translated via `ClientToScreen` and clamped within the in
 
 ---
 
-## 6. Native Binary Compilation — Source Obfuscation & Packaging (`build_release.py`)
+## 6. Multi-Edition Native Binary Compilation (`build_release.py` & `build_release.bat`)
 
-1. **Sequential Low-RAM Cython 3.3 Compilation**: Discovers all **33 modules** under `src/onmyoji_helper/` and compiles each inside an isolated child process (`--workers 1` default) into native Windows `.pyd` C-extensions with `docstrings=False`, `binding=False`, `c_line_in_traceback=False`, `emit_code_comments=False`, MSVC `/O2 /DNDEBUG`, and `/DEBUG:NONE` symbol stripping for source obfuscation and distribution hygiene.
-2. **Credential-Free Default Packaging**: Packages `OnmyojiHelper.exe` with `--onedir --windowed --uac-admin --contents-directory=data`, embedding the Windows `requireAdministrator` PE `RT_MANIFEST` and copying `.env.example` (never `.env` unless `--include-local-env` is explicitly passed) alongside local model weights.
-3. **Automated Post-Build Hygiene Audit**: Verifies root directory cleanliness (`['OnmyojiHelper.exe', 'data']`), `requireAdministrator` manifest presence, `33/33` `.pyd` module completeness, **zero `.py` source files**, and **zero accidental `.env` bundling** in default builds.
+1. **Sequential Low-RAM Cython 3.3 Compilation**: Discovers all **33 modules** under `src/onmyoji_helper/` and compiles each inside an isolated child process (`--workers 1..2`) into native Windows `.pyd` C-extensions with `docstrings=False`, `binding=False`, `c_line_in_traceback=False`, `emit_code_comments=False`, MSVC `/O2 /DNDEBUG`, and `/DEBUG:NONE` symbol stripping.
+2. **Four Isolated Packaging Profiles (`--profile`)**:
+   - **`personal`** (`dist/OnmyojiHelper_Personal/`): 33 `.pyd` modules + local `.env` + `best.pt` + local `.gguf` (`--uac-admin`).
+   - **`hr-demo`** (`dist/OnmyojiHelper_HR_Demo/` + `OnmyojiHelper_HR_Demo_Win64.zip`): 33 `.pyd` modules, **zero `.env`** (`.env.example` only), standard user privileges (no UAC prompt), excludes heavy GPU/OCR packages, and writes `data/demo_default.flag` for zero-argument Offline Demo startup.
+   - **`friend-full`** (`dist/OnmyojiHelper_Friend_Full/`): Hardened `.pyd` modules + `ONMYOJI_LOG_LEVEL=WARNING` + whitelist `.env` + `best.pt` + auto-discovered `.gguf` copied into `data/models/` with rewritten `LOCAL_LLM_MODEL_PATH`.
+   - **`friend-lite`** (`dist/OnmyojiHelper_Friend_Lite/`): Hardened `.pyd` modules + `ONMYOJI_LOG_LEVEL=WARNING` + whitelist `.env` + `best.pt`, excluding `llama_cpp` and injecting `FORCE_LITE_ENGINE=1` for low-spec / non-CUDA machines.
+3. **Automated Post-Build Hygiene Audit**: Verifies root directory cleanliness (`['OnmyojiHelper.exe', 'data']`), profile-matched PE UAC manifest, `33/33` `.pyd` module completeness, **zero `.py` source files**, and **zero accidental `.env` bundling** in `hr-demo` builds.
 
 ---
 

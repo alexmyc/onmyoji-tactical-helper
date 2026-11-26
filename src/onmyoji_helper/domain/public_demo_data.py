@@ -99,7 +99,7 @@ def format_bilingual_list(tokens: list[str]) -> str:
     return ", ".join(format_bilingual_token(t) for t in tokens)
 
 PUBLIC_DEMO_SYSTEMS: dict[str, dict[str, Any]] = {
-    "Sandbox · Ban禪 Tempo Playbook": {
+    "Offline Demo": {
         "my_ban": "禪",
         "raw_data": "\n".join(
             [
@@ -115,7 +115,7 @@ PUBLIC_DEMO_SYSTEMS: dict[str, dict[str, Any]] = {
             ]
         ),
     },
-    "Sandbox · Ban不相 Control Playbook": {
+    "Demo · Ban不相": {
         "my_ban": "不相",
         "raw_data": "\n".join(
             [
