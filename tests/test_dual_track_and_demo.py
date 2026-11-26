@@ -1,12 +1,20 @@
 """Unit Tests for Dual-Track `.env` Isolation, Public Sandbox Mode, and `--demo` Scenarios."""
 
+import os
+import subprocess
+import sys
+import tomllib
 from pathlib import Path
 
 import pytest
 
+import onmyoji_helper
 from onmyoji_helper.decision.draft_engine import build_database
 from onmyoji_helper.domain.models import OperatingMode
-from onmyoji_helper.domain.public_demo_data import get_public_demo_bundle
+from onmyoji_helper.domain.public_demo_data import (
+    format_bilingual_token,
+    get_public_demo_bundle,
+)
 from onmyoji_helper.domain.shikigami_repository import ShikigamiRepository
 from onmyoji_helper.infra.auth_service import check_activation, get_auth_csv_url
 from onmyoji_helper.infra.env_loader import parse_dotenv_file
@@ -117,3 +125,46 @@ def test_demo_sandbox_controller_all_four_scenarios() -> None:
 
     t4 = ctrl.next_step()
     assert "SP06" in t4.status_text and "[S1]" in t4.status_text and "玲" in t4.status_text
+
+    # Interactive mode switches (Green / Yellow / Red) & Playbook selector work offline without game/GPU
+    y_res = ctrl.switch_demo_mode("yellow")
+    assert y_res.mode == OperatingMode.YELLOW.value
+    assert "SP Enma" in y_res.tactical_advice and "Hatsune Miku" in y_res.tactical_advice
+
+    r_res = ctrl.switch_demo_mode("red")
+    assert r_res.mode == OperatingMode.RED.value
+    assert "Skill-First" in r_res.tactical_advice and "SP Susabi" in r_res.tactical_advice
+
+    g_res = ctrl.switch_demo_mode("green")
+    assert g_res.mode == OperatingMode.GREEN.value
+    assert "Green Mode" in g_res.tactical_advice
+
+    alt_pb = list(compiled_dbs.keys())[1]
+    pb_res = ctrl.set_active_playbook(alt_pb)
+    assert alt_pb in pb_res.telemetry_lines[0]
+    assert format_bilingual_token("閻") == "閻 (SP Enma)"
+
+
+def test_version_consistency_and_headless_clean_demo_smoke() -> None:
+    """Ensures package `__version__` matches `pyproject.toml` (`1.0.0`) and `--demo` runs credential-free."""
+    root_dir = Path(__file__).resolve().parent.parent
+    pyproject_data = tomllib.loads((root_dir / "pyproject.toml").read_text(encoding="utf-8"))
+    assert onmyoji_helper.__version__ == "1.0.0"
+    assert pyproject_data["project"]["version"] == onmyoji_helper.__version__
+
+    env = dict(os.environ)
+    env["ONMYOJI_DISABLE_DOTENV"] = "1"
+    env["ONMYOJI_SKIP_UAC_FOR_TEST"] = "1"
+    proc = subprocess.run(
+        [sys.executable, str(root_dir / "run_app.py"), "--demo", "--smoke-exit-ms", "800"],
+        cwd=str(root_dir),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    # On headless Windows runners without an interactive display server, TclError may occur;
+    # on any desktop session, `--demo --smoke-exit-ms 800` must exit cleanly with code 0!
+    if "TclError" not in proc.stderr:
+        assert proc.returncode == 0, f"--demo smoke failed:\nSTDOUT:{proc.stdout}\nSTDERR:{proc.stderr}"

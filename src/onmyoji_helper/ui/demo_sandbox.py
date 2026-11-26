@@ -17,6 +17,10 @@ from onmyoji_helper.decision.draft_engine import get_recommendation
 from onmyoji_helper.decision.draft_fsm import DraftStateMachine
 from onmyoji_helper.decision.llm_engine import TacticalEngine
 from onmyoji_helper.domain.models import DraftPhase, OperatingMode
+from onmyoji_helper.domain.public_demo_data import (
+    format_bilingual_list,
+    format_bilingual_token,
+)
 from onmyoji_helper.domain.shikigami_repository import ShikigamiRepository
 from onmyoji_helper.ui.main_window import OnmyojiHelperUI
 from onmyoji_helper.ui.tactical_panel import AITacticalUI
@@ -68,13 +72,43 @@ class DemoSandboxController:
         system_keys = list(compiled_dbs.keys())
         self.primary_sys_name: str = system_keys[0]
         self.control_sys_name: str = system_keys[1] if len(system_keys) > 1 else system_keys[0]
+        self.active_sys_name: str = self.primary_sys_name
 
         self.scenario_idx: int = 0
         self.step_idx: int = -1
 
-    def _get_system(self, name: str) -> tuple[dict[str, Any], str]:
-        entry = self.compiled_dbs[name]
+    def _get_system(self, name: str | None = None) -> tuple[dict[str, Any], str]:
+        target_name = name if (name and name in self.compiled_dbs) else self.active_sys_name
+        entry = self.compiled_dbs[target_name]
         return entry["db"], str(entry["my_ban"])
+
+    def set_active_playbook(self, playbook_name: str) -> SandboxStepResult:
+        """Switches the active playbook in `--demo` and re-evaluates the current draft scenario."""
+        if playbook_name in self.compiled_dbs:
+            self.active_sys_name = playbook_name
+        curr_step = max(0, self.step_idx)
+        if self.scenario_idx == 3:
+            return self._exec_scenario_combat_turns(curr_step)
+        if self.scenario_idx == 1:
+            return self._exec_scenario_stolen_pivot(curr_step)
+        if self.scenario_idx == 2:
+            return self._exec_scenario_mirror_detection(curr_step)
+        return self._exec_scenario_counter_chain(curr_step)
+
+    def switch_demo_mode(self, target_mode: str) -> SandboxStepResult:
+        """Jumps interactively to a representative Green, Yellow, or Red state in `--demo`."""
+        mode_val = target_mode.value if isinstance(target_mode, OperatingMode) else str(target_mode).lower()
+        if mode_val == OperatingMode.GREEN.value:
+            self.scenario_idx = 0
+            self.step_idx = 3
+            return self._exec_scenario_counter_chain(3)
+        if mode_val == OperatingMode.YELLOW.value:
+            self.scenario_idx = 3
+            self.step_idx = 0
+            return self._exec_scenario_combat_turns(0)
+        self.scenario_idx = 3
+        self.step_idx = 1
+        return self._exec_scenario_combat_turns(1)
 
     def total_steps_for_scenario(self, scenario_idx: int) -> int:
         counts = (5, 3, 2, 4)
@@ -112,7 +146,7 @@ class DemoSandboxController:
         return self._exec_scenario_combat_turns(self.step_idx)
 
     def _exec_scenario_counter_chain(self, step: int) -> SandboxStepResult:
-        db, my_ban = self._get_system(self.primary_sys_name)
+        db, my_ban = self._get_system()
         ocr_frames: list[tuple[list[tuple[None, str, float]], list[tuple[None, str, float]], str]] = [
             (
                 [(None, "禁選階段", 0.99)],
@@ -180,25 +214,28 @@ class DemoSandboxController:
         if snapshot.just_completed_five_picks:
             advice = (
                 "⚡ [5v5 Battle Handoff Ready — Yellow Mode]\n"
-                "Final Lineups Locked: Ally [離 神 葛 連 骷] vs Enemy [石 神 閻 SP06 SP熊]\n\n"
-                "🎯 Priority Threat: Enemy [Slot 3] 閻 (Top-speed single-target morph/silence)\n"
-                "💡 Opening Plan: Use [連] wind shields & [葛] fox-guard on [骷] to absorb SP06 volley."
+                "• 5-Pick Portrait Templates Locked (`ActionBarDetector`, 5/5 slots)\n"
+                "• Waiting for Deterministic Skill-Bar Ready (`is_my_turn == True`) to calibrate baselines\n\n"
+                "🎯 Priority Threat: Enemy [Slot 3] 閻 (SP Enma — Top-speed single-target morph/silence)\n"
+                "💡 Opening Plan: Use 連 (Ichimokuren) wind shields & 葛 (Kuzunoha) fox-guard on 骷 (Gashadokuro)."
             )
         else:
+            top_recs_bi = format_bilingual_list(recs[:3])
+            top_preds_bi = format_bilingual_list(preds[:3]) if preds else "—"
             advice = (
-                "🟢 [Green Mode — Draft Phase Active (0 MB GPU VRAM)]\n"
+                "🟢 [Green Mode — Draft Decision Support (0 MB GPU VRAM)]\n"
                 f"• FSM Phase: {snapshot.phase.value} | Poll Cadence: {self.fsm.get_recommended_poll_interval():.1f}s\n"
-                f"• Next Recommended Counter: {' / '.join(recs[:3])}\n"
-                f"• Predicted Opponent Pool: {' / '.join(preds[:3]) if preds else '—'}"
+                f"• Recommended Next Counter: {top_recs_bi}\n"
+                f"• Predicted Opponent Pool: {top_preds_bi}"
             )
 
         telemetry = [
-            f"Playbook: {self.primary_sys_name} (My Ban: {my_ban})",
-            f"FSM Phase: {snapshot.phase.value} | Opp Ban: {opp_ban_ui}",
-            f"Ally Backbone (Ordered): {snapshot.my_draft or ['(empty)']}",
-            f"Enemy Formation (Set):   {snapshot.opp_draft or ['(empty)']}",
-            f"XMind Top Counters:      {recs}",
-            f"Opponent Predictions:    {preds}",
+            f"Playbook: {self.active_sys_name} (My Ban: {format_bilingual_token(my_ban)})",
+            f"FSM Phase: {snapshot.phase.value} | Opp Ban: {format_bilingual_token(opp_ban_ui)}",
+            f"Ally Backbone (Ordered): {format_bilingual_list(snapshot.my_draft)}",
+            f"Enemy Formation (Set):   {format_bilingual_list(snapshot.opp_draft)}",
+            f"XMind Top Counters:      {format_bilingual_list(recs[:4])}",
+            f"Opponent Predictions:    {format_bilingual_list(preds[:4])}",
             f"Branch Score Telemetry:  {match_type}",
         ]
         return SandboxStepResult(
@@ -421,30 +458,45 @@ class DemoSandboxController:
         target_slot = payload["recommended_target_slot"]
         target_name = str(payload["recommended_target_name"])
         target_is_enemy = bool(payload["target_is_enemy"])
+        actor_bi = format_bilingual_token(str(case["active_name"]))
+        target_bi = format_bilingual_token(target_name)
+        scope_en_map = {
+            "敵方單體": "Enemy Single-Target",
+            "敵方全體": "Enemy AoE",
+            "我方全體": "Ally AoE",
+            "我方單體": "Ally Single-Target",
+            "自己": "Self",
+        }
+        scope_en = scope_en_map.get(scope, scope)
 
         mode_banner = (
-            "🔴 [Red Mode Simulation — Safe Dry-Run (No OS Mouse Injection)]"
+            "🔴 [Red Mode Simulation — Skill-First Dry-Run (Zero OS Mouse Injection)]"
             if case["mode"] == OperatingMode.RED.value
-            else "🟡 [Yellow Mode — Non-Activating Tactical HUD]"
+            else "🟡 [Yellow Mode — Non-Activating HUD + Tactical Advisor]"
+        )
+        en_summary = (
+            f"• Active Turn (`ActionBarDetector`): [{case['active_slot']}] {actor_bi}\n"
+            f"• Decision: Cast [{chosen_skill}] ({scope_en}) → "
+            f"{'Enemy' if target_is_enemy else 'Ally'} {f'[{target_slot}] ' if target_slot else ''}{target_bi}"
         )
         advice_text = (
             f"{mode_banner}\n"
-            f"🎯 Target Lock: {f'[{target_slot}] ' if target_slot else ''}{target_name} ({scope})\n"
-            f"⚡ Chosen Skill: [{chosen_skill}] | Available Buttons: {case['skills']}\n"
-            f"{'─' * 28}\n"
+            f"{en_summary}\n"
+            f"• Available Skill Bar (`TurnDetector`): {case['skills']}\n"
+            f"{'─' * 30}\n"
             f"{payload['fallback_advice']}"
         )
 
         exec_plan = (
-            f"2-Step Click -> Lock {'Enemy' if target_is_enemy else 'Ally'} "
-            f"{target_slot or 'Alive Slot 1'} ({target_name}) -> Cast [{chosen_skill}]"
+            f"Skill-First 2-Step -> [1] Click [{chosen_skill}] -> 0.24s highlight pause -> "
+            f"[2] Click {'Enemy' if target_is_enemy else 'Ally'} {target_slot or 'Slot 1'} ({target_bi})"
         )
         telemetry = [
-            f"Active Turn Unit: [{case['active_slot']}] {case['active_name']} | Buttons={case['skills']}",
-            f"TargetSelector Output: skill={chosen_skill}, scope={scope}, is_enemy={target_is_enemy}",
-            f"Resolved Target: slot={target_slot}, name={target_name}",
+            "Turn-UI Baseline Gate: Calibrated on deterministic skill-bar ready (is_my_turn=True)",
+            f"ActionBarDetector Match: [{case['active_slot']}] {actor_bi} (score=0.84 >= 0.15)",
+            f"TargetSelector Output: skill={chosen_skill}, scope={scope_en}, is_enemy={target_is_enemy}",
             f"AutoBattleExecutor Plan: {exec_plan}",
-            f"Tactical Engine Tier: {llm_res['mode']}",
+            f"Tactical Engine Tier: {llm_res['mode']} (+ 1.2–1.8s unfinished-turn retry guard)",
         ]
         return SandboxStepResult(
             scenario_index=3,
@@ -473,9 +525,11 @@ class DemoSandboxWindow:
         ui_app: OnmyojiHelperUI,
         compiled_dbs: dict[str, dict[str, Any]],
         repository: ShikigamiRepository,
+        demo_mode: bool = False,
     ) -> None:
         self.root: tk.Tk = root
         self.ui_app: OnmyojiHelperUI = ui_app
+        self.demo_mode: bool = demo_mode
         self.controller: DemoSandboxController = DemoSandboxController(compiled_dbs, repository)
         self.auto_playing: bool = False
         self._after_id: str | None = None
@@ -490,15 +544,19 @@ class DemoSandboxWindow:
         screen_w = self.root.winfo_screenwidth()
         right_x = max(580, screen_w - 555)
         self.root.geometry(f"520x545+{right_x}+40")
+        if self.demo_mode:
+            self.root.title("Onmyoji Tactical Helper — Live Draft & Mode View (--demo)")
 
         self.ai_panel: AITacticalUI = AITacticalUI(
             self.root,
             close_callback=self._on_ai_panel_closed,
         )
+        if self.demo_mode:
+            self.ai_panel.window.title("AI Tactical Advisor — Live Telemetry (--demo)")
         self.ai_panel.window.geometry(f"520x310+{right_x}+605")
 
         left_x = max(25, right_x - 600)
-        self.window.geometry(f"575x600+{left_x}+40")
+        self.window.geometry(f"575x650+{left_x}+40")
         self.window.protocol("WM_DELETE_WINDOW", self.close)
 
         self.h_font = font.Font(family="Segoe UI", size=12, weight="bold")
@@ -507,8 +565,41 @@ class DemoSandboxWindow:
         self.mono_font = font.Font(family="Consolas", size=9)
 
         self._scenario_btns: list[tk.Button] = []
+        self._mode_btns: dict[str, tk.Button] = {}
         self._build_widgets()
+        if self.demo_mode or self.ui_app.mode_change_callback is None:
+            self._attach_main_window_hooks()
         self.apply_result(self.controller.select_scenario(0))
+
+    def _attach_main_window_hooks(self) -> None:
+        """Wires `MainWindow` mode dot, reset button, and playbook menu directly into the sandbox."""
+        self.ui_app.mode_change_callback = self.on_mode_requested
+        self.ui_app.enable_mode_click()
+        if self.demo_mode:
+            self.ui_app.btn_reset.config(command=self._on_reset_clicked)
+            orig_on_ban = self.ui_app.on_ban_changed
+
+            def _demo_on_ban_changed(selected: str) -> None:
+                orig_on_ban(selected)
+                self._stop_autoplay()
+                self.apply_result(self.controller.set_active_playbook(selected))
+
+            def _make_pb_cmd(val: str) -> Callable[[], None]:
+                def _run() -> None:
+                    self.ui_app.selected_ban.set(val)
+                    _demo_on_ban_changed(val)
+
+                return _run
+
+            menu = self.ui_app.ban_menu["menu"]
+            menu.delete(0, "end")
+            for pb_name in self.ui_app.available_bans:
+                menu.add_command(label=pb_name, command=_make_pb_cmd(pb_name))
+
+    def on_mode_requested(self, target_mode: str) -> None:
+        """Handles mode switches triggered either from `MainWindow`'s status dot or Sandbox buttons."""
+        self._stop_autoplay()
+        self.apply_result(self.controller.switch_demo_mode(target_mode))
 
     def _on_ai_panel_closed(self) -> None:
         pass
@@ -624,6 +715,39 @@ class DemoSandboxWindow:
         )
         self.btn_reset.pack(side=tk.LEFT, ipadx=14, padx=(5, 0), ipady=6)
 
+        mode_bar = tk.Frame(self.window, bg="#121212")
+        mode_bar.pack(fill=tk.X, padx=14, pady=(0, 6))
+        tk.Label(
+            mode_bar,
+            text="MODE PREVIEW (or click status dot on Main Window):",
+            bg="#121212",
+            fg="#8E8E93",
+            font=self.sub_font,
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        def _make_mode_cmd(mk: str) -> Callable[[], None]:
+            return lambda: self.on_mode_requested(mk)
+
+        for m_key, m_label, m_fg in (
+            (OperatingMode.GREEN.value, "🟢 Green", "#34C759"),
+            (OperatingMode.YELLOW.value, "🟡 Yellow", "#FFCC00"),
+            (OperatingMode.RED.value, "🔴 Red", "#FF453A"),
+        ):
+            m_btn = tk.Button(
+                mode_bar,
+                text=m_label,
+                bg="#1C1C1E",
+                fg=m_fg,
+                activebackground="#2C2C2E",
+                activeforeground=m_fg,
+                font=self.btn_font,
+                relief=tk.FLAT,
+                cursor="hand2",
+                command=_make_mode_cmd(m_key),
+            )
+            m_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=2, ipady=3)
+            self._mode_btns[m_key] = m_btn
+
         self.lbl_headline = tk.Label(
             self.window,
             text="",
@@ -681,6 +805,9 @@ class DemoSandboxWindow:
                 bg="#2C3E50" if is_active else "#1C1C1E",
                 fg="#4CC2FF" if is_active else "#F5F5F7",
             )
+
+        for m_key, m_btn in self._mode_btns.items():
+            m_btn.config(bg="#2C3E50" if m_key == res.mode else "#1C1C1E")
 
         step_badge = f"[Step {res.step_index + 1}/{res.total_steps}] {res.headline}"
         self.lbl_headline.config(text=step_badge)

@@ -51,6 +51,53 @@ PUBLIC_DEMO_MULTI_SHORTS: list[str] = [
     "SP桃",
 ]
 
+PUBLIC_DEMO_EN_GLOSSARY: dict[str, str] = {
+    "封": "Fengyangjun",
+    "離": "Shiranui",
+    "神": "Amaterasu",
+    "神荒": "SP Susabi",
+    "SP06": "SP Otakemaru",
+    "石": "Iwannagahime",
+    "閻": "SP Enma",
+    "火": "SP Zashiki",
+    "葛": "Kuzunoha",
+    "帝": "Taishakuten",
+    "骷": "Gashadokuro",
+    "連": "Ichimokuren",
+    "酒吞": "Shuten Doji",
+    "百羽": "SP Hououka",
+    "追月": "SP Oitsuki",
+    "須": "Susanoo",
+    "千": "Senhime",
+    "SP熊": "SP Hoshiguma",
+    "SP草": "SP Kusa",
+    "SP緣": "SP Enmusubi",
+    "SP葉": "SP Momiji",
+    "言": "Kotodama",
+    "季": "Jinkougyou",
+    "瀧": "Taki",
+    "荒": "Susabi",
+    "SP桃": "SP Momo",
+    "玲": "Hatsune Miku",
+    "禪": "Ungaikyo",
+    "不相": "Mismatched",
+}
+
+
+def format_bilingual_token(token: str | None) -> str:
+    """Formats a short shikigami token with its English name for recruiter-friendly telemetry."""
+    if not token:
+        return "None"
+    en = PUBLIC_DEMO_EN_GLOSSARY.get(token)
+    return f"{token} ({en})" if en else token
+
+
+def format_bilingual_list(tokens: list[str]) -> str:
+    """Formats a list of short shikigami tokens into a concise bilingual string."""
+    if not tokens:
+        return "(empty)"
+    return ", ".join(format_bilingual_token(t) for t in tokens)
+
 PUBLIC_DEMO_SYSTEMS: dict[str, dict[str, Any]] = {
     "Sandbox · Ban禪 Tempo Playbook": {
         "my_ban": "禪",

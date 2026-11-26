@@ -375,6 +375,7 @@ def run_application(argv: list[str] | None = None) -> None:
             ui_app=app,
             compiled_dbs=compiled_dbs,
             repository=repository,
+            demo_mode=demo_mode,
         )
         sandbox_holder.clear()
         sandbox_holder.append(win)
@@ -392,9 +393,10 @@ def run_application(argv: list[str] | None = None) -> None:
         open_or_focus_sandbox()
         if args.smoke_exit_ms > 0:
             sb = sandbox_holder[0]
-            root.after(200, lambda: sb.apply_result(sb.controller.select_scenario(1)))
-            root.after(400, lambda: sb.apply_result(sb.controller.select_scenario(2)))
-            root.after(600, lambda: sb.apply_result(sb.controller.select_scenario(3)))
+            root.after(150, lambda: sb.apply_result(sb.controller.select_scenario(1)))
+            root.after(300, lambda: sb.apply_result(sb.controller.select_scenario(2)))
+            root.after(450, lambda: sb.on_mode_requested("yellow"))
+            root.after(600, lambda: sb.on_mode_requested("red"))
             root.after(args.smoke_exit_ms, root.destroy)
         root.mainloop()
         return

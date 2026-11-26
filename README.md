@@ -15,10 +15,21 @@
 
 ## Overview
 
-**Onmyoji Tactical Helper** is a real-time computer vision, multimodal tactical decision-support, and desktop UI automation system engineered around competitive PvP drafting and 5v5 turn-based combat in *Onmyoji (陰陽師)*. Its centerpiece is **non-intrusive visual HUD telemetry and live tactical reasoning (Yellow Mode)**—executing a 100% local perception-and-decision pipeline alongside a 60 FPS DirectX client without inducing frame drops, scaling from GPU-accelerated **Gemma-4** inference down to a **zero-VRAM deterministic rule engine** on integrated graphics laptops.
+**Onmyoji Tactical Helper** solves a demanding systems-engineering problem: running **real-time multimodal computer vision, hybrid symbolic + edge-LLM decision-making, and mixed-DPI desktop HUD compositing** alongside a live 60 FPS DirectX tactical RPG (*Onmyoji*) on consumer hardware—with **zero cloud API latency, zero foreground frame drops, and graceful zero-VRAM fallback** on integrated-graphics laptops.
 
-> **Interactive Evaluation in 10 Seconds — No Game Client, GPU, or `.env` Required:**  
-> Run `python run_app.py --demo` after cloning to launch the **Interactive Match Sandbox**, stepping through Ban/Pick counter-chains, stolen-card dead-branch pivots, mirror-match detection, and 5v5 turn telemetry on the live UI windows.
+| Engineering Dimension | Production Implementation & Verifiable Metric |
+| :--- | :--- |
+| **Architecture** | Unidirectional **7-layer modular Python 3.12 package** (`33` modules, Cython 3.3 `.pyd` native compilation) |
+| **5v5 Vision & Tracking** | Custom `YOLOv8n` (**`99.5%` peak `mAP@50`**) + 2D partial-affine tracking + **Actionable Turn-UI baseline calibration** |
+| **End-to-End Latency** | **`2.865 ms` P50** (`3.829 ms` P99) single-frame `1280×720` CV + Rule + HUD + `125%` DWM DPI pipeline |
+| **Verification & QA** | **38 offline unit, E2E & noisy synthetic CV tests** (**`82.0%` core coverage**, `Ruff` + `Mypy` checked in CI) |
+
+> **30-Second Offline Interactive Demo — No Game Client, GPU, Model Weights, or `.env` Required:**
+> ```powershell
+> pip install numpy opencv-python pygetwindow pywin32
+> python run_app.py --demo
+> ```
+> Launches **three synchronized GUI windows** (*Interactive Match Sandbox*, *Live Draft & Mode View*, and *AI Tactical Advisor*) powered by the real production engines and built-in bilingual dataset (`27` aliases, `13` unit profiles, `2` playbooks). Step through Ban/Pick counter-chains, dead-branch pivots, mirror-match alerts, or click **Green / Yellow / Red** modes directly to inspect live engine telemetry.
 
 ---
 
@@ -26,19 +37,19 @@
 
 ### 1. Yellow Mode (Primary Showcase) — Non-Intrusive Tactical Advisor & Turn-Specific Guidance
 ![Yellow Mode Passive Tactical Advisor Panel](docs/image/ai_tactical.png)
-*Yellow Mode (`WS_EX_NOACTIVATE` floating HUD, zero mouse/keyboard intervention): bridges locked Ban/Pick draft context with real-time turn detection, guiding ally `[Slot 4] 閻` to cast `[S3]` single-target morph/silence onto priority enemy `[Slot 1] 玲`.*
+*Yellow Mode (`WS_EX_NOACTIVATE` floating HUD, zero mouse/keyboard intervention): bridges locked Ban/Pick draft context with real-time action-bar portrait matching and turn detection, guiding ally `[Slot 4]` (`SP Enma`) to cast `[S3]` single-target morph/silence onto priority enemy `[Slot 1]` (`Hatsune Miku`).*
 
 ### 2. Full Spatial HUD Telemetry — 5v5 Unit Tracking & Skill Bar Geometry (`125% DWM DPI`)
 ![Live 5v5 Spatial Tracking and HUD Overlay](docs/image/main_demo.png)
-*Live 5v5 PvP spatial tracking on a `1920×1200 @ 125% DWM DPI` display: custom `YOLOv8n` + 2D partial-affine tracking locks ally slots (`[Slot 1..4]` cyan rings), enemy slots (`[Slot 2..5]` red rings), and primary target crosshair (`🎯 [優先打擊] 玲`), paired with circumferential Sobel-verified `Skill Bar` button states (`S1..S4`), post-draft `MainWindow` (top-right), and floating `AI Tactical Advisor` (bottom-right).*
+*Live 5v5 PvP spatial tracking on a `1920×1200 @ 125% DWM DPI` display: custom `YOLOv8n` + 2D partial-affine tracking locks ally slots (`[Slot 1..4]` cyan rings), enemy slots (`[Slot 2..5]` red rings), and the primary target crosshair (`Priority Target Lock`), paired with circumferential Sobel-verified `Skill Bar` button states (`S1..S4`), post-draft `MainWindow` (top-right), and floating `AI Tactical Advisor` (bottom-right).*
 
 ---
 
 ## Key Engineering Highlights
 
 - **Multimodal Edge-AI Perception & Reasoning**
-  - **Ban/Pick Drafting Phase**: Pairs adaptive-resolution dual-column `RapidOCR` (`400px` `INTER_LINEAR` upscale on shrunk `< 380px` ROIs, `1:1` native pixels at `720p–833p`, `440px` `INTER_AREA` downscale on `1080p+` ROIs + `10px` DBNet border padding) with **two-tier + 2-frame temporal consistency filtering** (`>= 0.42` immediate pass; `0.28..0.42` repository-injected tokens such as `季` or `瀧` require `2` consecutive frames to eliminate single-frame background hallucinations) and a deterministic `DraftStateMachine` enforcing Opening Ban + `25s` Post-5-Pick Extra-Ban (`加禁`) tracking ahead of a **rule-based, dependency-aware XMind Counter Engine**.
-  - **5v5 Combat Phase**: Guards battle entry with a **Settled Battlefield Camera Gate** (`>= 2` consecutive dual-camp motion-settled frames or explicit `is_my_turn` / `4.5s` stealth fallback before locking baselines so VS banners and opening camera swoops never pollute slot anchors), then fuses **custom-trained `YOLOv8n`** unit detection, `cv2.estimateAffinePartial2D` camera-shake compensation, live 5-enemy perspective refresh + `0.115w` outer-slot tolerance, symmetric **3.5s ultimate-VFX occlusion EMA memory**, circumferential Sobel-verified `HoughCircles` turn/skill-slot geometry, and locked 5-pick avatar template matching (`CONF_THRESHOLD = 0.15`).
+  - **Ban/Pick Drafting Phase**: Pairs adaptive-resolution dual-column `RapidOCR` (`400px` `INTER_LINEAR` upscale on shrunk `< 380px` ROIs, `1:1` native pixels at `720p–833p`, `440px` `INTER_AREA` downscale on `1080p+` ROIs + `10px` DBNet border padding) with **two-tier + 2-frame temporal consistency filtering** (`>= 0.42` immediate pass; `0.28..0.42` repository-injected single-character unit tokens require `2` consecutive frames to eliminate single-frame background hallucinations) and a deterministic `DraftStateMachine` enforcing Opening Ban + `25s` Post-5-Pick Extra-Ban tracking ahead of a **rule-based, dependency-aware XMind Counter Engine**.
+  - **5v5 Combat Phase**: Prevents opening cutscene and pre-emptive realm camera skew via **Actionable Skill-Bar Turn-UI Calibration** (`is_my_turn == True` triggers clean `StateParser.reset_baseline()`, with an enemy-first `3.5s` provisional mode that forces a mandatory `reset_baseline()` recalibration on the first ally turn plus 5-enemy zero-drift self-healing), fused with **custom-trained `YOLOv8n`** detection, `cv2.estimateAffinePartial2D` camera-shake compensation, `0.115w` outer-slot perspective tolerance, symmetric **3.5s ultimate-VFX occlusion EMA memory**, circumferential Sobel-verified `HoughCircles` turn/skill geometry, and locked 5-pick avatar template matching (`CONF_THRESHOLD = 0.15`).
   - **Hardware-Tiered Local LLM**: Profiles CUDA VRAM and host RAM at runtime to offload **Gemma-4 (`Q4_K_M` GGUF)** onto NVIDIA GPUs or fall back transparently to a zero-latency, zero-VRAM symbolic rule engine.
 
 - **OS-Level Symbiosis & Low-Overhead Scheduling**
@@ -130,20 +141,20 @@ Full Ultralytics training configuration ([args.yaml](docs/model_artifacts/args.y
 | **`YOLOv8n` 5v5 Unit Detector (`best.pt` / `last.pt`)** | **Peak Ep.98 `mAP@50`: `99.5%` (`mAP@50-95`: `60.1%`)** · **Final Ep.150 `mAP@50`: `94.4%` (`mAP@50-95`: `52.2%`)** | Validation split metrics in [results.csv](docs/model_artifacts/results.csv); tight-IoU variance from ornate skins/halos is smoothed downstream by EMA + affine slot anchors |
 | **Noisy 2D Affine + `3.5s` Occlusion Tracker (`StateParser`)** | **`100%` slot retention** (`< 10 px` mean error under `±4 px` jitter + dropouts) | `cv2.estimateAffinePartial2D` + EMA suppresses detection jitter by `> 35%` and bridges `< 3.5s` ultimate-VFX blackouts (`tests/test_vision_synthetic_regression.py`) |
 | **Turn & Skill-Bar Verifier (`TurnDetector`)** | **16-pt Sobel ring (`>= 7/16` hits) + HSV gate** | Rejects full-screen flashbang washouts (`0` false triggers in synthetic regression) while resolving 3- vs. 4-skill button layouts |
-| **Draft `RapidOCR` Temporal Whitelist Gate** | **`>= 0.42` immediate · `0.28..0.42` 2-frame streak** | Adaptive `400–440px` ROI scaling + `2`-frame verification filters 1-frame background flickers (`火`, `白`) while confirming `季`, `瀧`, Opening Ban & Post-5-Pick `加禁` |
+| **Draft `RapidOCR` Temporal Whitelist Gate** | **`>= 0.42` immediate · `0.28..0.42` 2-frame streak** | Adaptive `400–440px` ROI scaling + `2`-frame verification filters 1-frame background flickers while confirming single-char picks, Opening Bans & Post-5-Pick Extra Bans |
 
 ### 2. Reproducible Offline Microbenchmarks & End-to-End Pipeline Latency (`P50 / P95 / P99`)
 Measured offline on Python `3.12.1` (`Windows x64`) via [scripts/run_benchmarks.py](scripts/run_benchmarks.py) — reproduce locally anytime with `python scripts/run_benchmarks.py` (raw output in [docs/BENCHMARKS.json](docs/BENCHMARKS.json)):
 
 | Pipeline Stage (`scripts/run_benchmarks.py`) | P50 (ms) | P95 (ms) | P99 (ms) | Mean (ms) |
 | :--- | :---: | :---: | :---: | :---: |
-| **`xmind_counter_tree_scoring`** (viability decay + mirror check) | **`0.083`** | **`0.125`** | **`0.162`** | `0.088` |
-| **`shikigami_repo_lru_lookup`** (`@lru_cache` tag query) | **`0.001`** | **`0.001`** | **`0.001`** | `0.001` |
-| **`noisy_2d_affine_spatial_tracker`** (`±4 px` noise + affine + EMA) | **`0.325`** | **`0.498`** | **`0.969`** | `0.357` |
-| **`mixed_dpi_coordinate_projection`** (`125% DPI` + `16:10` letterbox) | **`0.003`** | **`0.004`** | **`0.005`** | `0.003` |
-| **`draft_roi_motion_diff_gate`** (`120×80` `INTER_AREA` Gaussian absdiff gate) | **`0.550`** | **`0.729`** | **`1.461`** | `0.589` |
-| **`turn_detector_sobel_hsv_full_pass`** (`1280×720` Hough + Sobel + HSV) | **`3.228`** | **`4.854`** | **`6.471`** | `3.462` |
-| **`e2e_synthetic_frame_to_hud`** (`1280×720` Frame -> CV + Rule + HUD + `125%` DPI) | **`4.007`** | **`5.920`** | **`8.016`** | `4.233` |
+| **`xmind_counter_tree_scoring`** (viability decay + mirror check) | **`0.073`** | **`0.077`** | **`0.080`** | `0.073` |
+| **`shikigami_repo_lru_lookup`** (`@lru_cache` tag query) | **`< 0.001`** | **`< 0.001`** | **`0.001`** | `< 0.001` |
+| **`noisy_2d_affine_spatial_tracker`** (`±4 px` noise + affine + EMA) | **`0.282`** | **`0.313`** | **`0.336`** | `0.286` |
+| **`mixed_dpi_coordinate_projection`** (`125% DPI` + `16:10` letterbox) | **`0.003`** | **`0.003`** | **`0.004`** | `0.003` |
+| **`draft_roi_motion_diff_gate`** (`120×80` `INTER_AREA` Gaussian absdiff gate) | **`0.477`** | **`0.539`** | **`0.613`** | `0.485` |
+| **`turn_detector_sobel_hsv_full_pass`** (`1280×720` Hough + Sobel + HSV) | **`2.452`** | **`2.893`** | **`3.035`** | `2.502` |
+| **`e2e_synthetic_frame_to_hud`** (`1280×720` Frame -> CV + Rule + HUD + `125%` DPI) | **`2.865`** | **`3.606`** | **`3.829`** | `2.978` |
 
 *Live runtime reference (RTX 3080 Laptop GPU, `1920×1200 @ 125% DPI`): GDI `BitBlt` + border crop `~1.8 ms`, `YOLOv8n` forward pass `~8 ms` (CUDA `640px`) / `~28 ms` (CPU `480px`), `SafetyGuard` hotkey poll `50 ms`, idle background CPU `< 1.5%`.*
 
@@ -164,13 +175,18 @@ Click the status indicator dot in the top-left corner of the main window to cycl
 ### 1. Instant Offline Interactive Demo (Recommended for Reviewers)
 No game installation, external model weights, UAC elevation, or `.env` configuration required:
 ```powershell
+# Minimal 3-second install for the offline interactive sandbox:
+pip install numpy opencv-python pygetwindow pywin32
+
+# Or install the full CV + ONNX OCR runtime:
 pip install -r requirements.txt
+
 python run_app.py --demo
 ```
-Opens the **Draft Window**, **AI Tactical Panel**, and **Interactive Match Sandbox** side-by-side using the built-in Public Sandbox dataset (`27` sample aliases, `13` combat profiles, `2` playbooks) with real-time English inspector telemetry.
+Opens the **Draft & Mode Window**, **AI Tactical Panel**, and **Interactive Match Sandbox** side-by-side using the built-in bilingual Public Sandbox dataset (`27` sample aliases, `13` combat profiles, `2` playbooks). Step through all 4 engineering scenarios, switch playbooks, or click **Green / Yellow / Red** modes on either window to inspect real-time engine decisions.
 
 ### 2. Run QA Gate (Tests, Coverage Transparency, Mypy, Ruff & Benchmarks)
-Install QA/development tools from `requirements-dev.txt` and run all **37** offline tests:
+Install QA/development tools from `requirements-dev.txt` and run all **38** offline tests:
 ```powershell
 pip install -r requirements-dev.txt
 pytest -v --cov=onmyoji_helper --cov-report=term-missing --cov-fail-under=70
@@ -178,7 +194,7 @@ mypy src
 ruff check src tests scripts run_app.py build_release.py
 python scripts/run_benchmarks.py
 ```
-- **Coverage Scope Transparency**: Headless CI enforces **`>= 70%`** coverage across the decoupled core decision, vision, domain, automation, and sync-parser layers (currently **`81.8%`** across `2,223` statements). Full-repository line coverage—when counting interactive Tkinter GUI windows, Win32 GDI/SendInput syscalls, and CUDA/GGUF model loaders (`4,760` total statements)—stands at **`60.0%`**.
+- **Coverage Scope Transparency**: Headless CI enforces **`>= 70%`** coverage across the decoupled core decision, vision, domain, automation, and sync-parser layers (currently **`82.0%`** across `2,233` statements). Full-repository line coverage—when counting interactive Tkinter GUI windows, Win32 GDI/SendInput syscalls, and CUDA/GGUF model loaders (`4,810` total statements)—stands at **`59.4%`**.
 
 ### 3. Live HUD Execution & Optional Private Cloud Sync (`.env`)
 - **Public Sandbox Mode (Default)**: Launching `python run_app.py` without `.env` loads the built-in sample dataset (`public_demo_data.py`: `27` aliases, `13` tags, `2` playbooks).
@@ -227,7 +243,7 @@ onmyoji-tactical-helper/
 │       ├── infra/                     # EnvLoader, Win32 APIs, BitBlt, XOR cache sync & VRAM guard
 │       ├── ui/                        # MainWindow, AITacticalUI, BattleOverlayUI & DemoSandbox
 │       └── app/                       # Runtime bootstrap, ModeController & BattleCoordinator
-├── tests/                             # Offline unit, E2E & noisy synthetic CV suite (37 tests)
+├── tests/                             # Offline unit, E2E & noisy synthetic CV suite (38 tests)
 └── .github/workflows/ci.yml           # GitHub Actions CI (Ruff + Mypy + Pytest >=70% Core Coverage)
 ```
 
