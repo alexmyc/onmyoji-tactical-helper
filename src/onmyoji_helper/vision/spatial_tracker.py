@@ -218,7 +218,14 @@ class StateParser:
                 self.baseline_opp[slot_name] = (float(box["cx"]), float(box["cy"]))
             self.is_opp_baseline_set = True
 
-        if len(ally_boxes) == 5 and not self.is_my_baseline_set:
+        if (
+            len(ally_boxes) == 5
+            and not self.is_my_baseline_set
+            and all(
+                (float(ally_boxes[i + 1]["cx"]) - float(ally_boxes[i]["cx"])) >= (screen_width * 0.03)
+                for i in range(4)
+            )
+        ):
             if self.baseline_w <= 0:
                 self.baseline_w, self.baseline_h = screen_width, actual_h
             for i, box in enumerate(ally_boxes[:5]):

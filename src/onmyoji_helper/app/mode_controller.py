@@ -57,6 +57,17 @@ class ModeController:
             self.saved_draft_data = (root_window, list(my_draft), list(opp_draft), int(hwnd))
         self.handle_five_picks(root_window, my_draft, opp_draft, screen_color, hwnd)
 
+    def update_saved_draft(
+        self,
+        root_window: tk.Tk,
+        my_draft: list[str],
+        opp_draft: list[str],
+        hwnd: int = 0,
+    ) -> None:
+        """Updates cached 5-pick lineup metadata in-place (e.g. when ally Pick 5 flips slightly after opponent)."""
+        with self._lock:
+            self.saved_draft_data = (root_window, list(my_draft), list(opp_draft), int(hwnd))
+
     def clear_draft_data(self) -> None:
         with self._lock:
             self.saved_draft_data = None

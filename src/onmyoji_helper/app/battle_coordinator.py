@@ -36,8 +36,13 @@ class AITacticalManager:
 
     POLL_MY_TURN: float = 0.20
     POLL_OPP_TURN: float = 0.35
+    POLL_ENTRY_SETTLE: float = 0.20
     POST_DECISION_BUFFER_RANGE: tuple[float, float] = (1.0, 1.5)
     DRAFT_FADE_GRACE_SEC: float = 2.5
+    SETTLED_MIN_CONSECUTIVE_FRAMES: int = 2
+    SETTLED_MAX_MEAN_DISP_RATIO: float = 0.018
+    SETTLED_MAX_PEAK_DISP_RATIO: float = 0.035
+    BATTLE_SETTLE_FALLBACK_SEC: float = 4.5
 
     def __init__(self, repository: ShikigamiRepository | None = None) -> None:
         self.models: ModelLifecycleManager = ModelLifecycleManager()
@@ -66,7 +71,10 @@ class AITacticalManager:
 
         self.no_box_start_time: float = 0.0
         self.session_start_time: float = 0.0
-        self.consecutive_alive_frames: int = 0
+        self.settled_entry_frames: int = 0
+        self._entry_first_unit_ts: float = 0.0
+        self._entry_prev_opp: list[tuple[float, float]] = []
+        self._entry_prev_my: list[tuple[float, float]] = []
         self._frame_seq: int = 0
 
         self.is_ai_reasoning: bool = False
@@ -196,7 +204,7 @@ class AITacticalManager:
             self.mode_controller.emergency_downgrade_to_yellow(reason)
 
     def close_ui_sync(self, unload_models: bool = False) -> None:
-        """Synchronously halts active battle threads and destroys floating UIs (keeping models warm AND preserving locked match templates!)."""
+        """Synchronously halts active battle threads, resets tracker baselines, and destroys floating UIs (preserving locked match templates)."""
         self.auto_battle_enabled = False
         self.auto_executor.stop_immediately()
         self.wake_loop()
@@ -205,11 +213,17 @@ class AITacticalManager:
             self.user_closed = True
             self.stop_requested = True
             self.is_active_session = False
+            self.battle_has_started = False
+            self._reset_entry_gate_state()
             self.presenter.destroy_all(self.root_window)
 
         if self.battle_thread and self.battle_thread.is_alive():
             if self.battle_thread != threading.current_thread():
                 self.battle_thread.join(timeout=1.5)
+
+        with self.models.yolo_lock:
+            self.parser.reset_baseline()
+            self.turn_detector.reset_cache()
 
         if unload_models:
             retry = 0
@@ -233,12 +247,173 @@ class AITacticalManager:
         else:
             self.close_ui()
 
+    def _reset_entry_gate_state(self) -> None:
+        """Clears pre-battle camera-settle history so transitional frames never leak across sessions."""
+        self.settled_entry_frames = 0
+        self._entry_first_unit_ts = 0.0
+        self._entry_prev_opp = []
+        self._entry_prev_my = []
+
+    @staticmethod
+    def _extract_valid_combat_points(
+        boxes_data: list[dict[str, Any]],
+        screen_w: int,
+        screen_h: int,
+    ) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+        """Extracts valid enemy and ally center points without mutating `StateParser` baselines."""
+        opp_pts = sorted(
+            [
+                (float(b["cx"]), float(b["cy"]))
+                for b in boxes_data
+                if b.get("cls") == 0 and (screen_w * 0.02) <= float(b.get("cx", 0.0)) <= (screen_w * 0.98)
+            ],
+            key=lambda p: p[0],
+        )
+        my_pts = sorted(
+            [
+                (float(b["cx"]), float(b["cy"]))
+                for b in boxes_data
+                if b.get("cls") == 1
+                and float(b.get("cy", 0.0)) > (screen_h * 0.40)
+                and float(b.get("cx", 0.0)) < (screen_w * 0.87)
+            ],
+            key=lambda p: p[0],
+        )
+        return opp_pts, my_pts
+
+    @classmethod
+    def _camp_displacements(
+        cls,
+        prev_pts: list[tuple[float, float]],
+        curr_pts: list[tuple[float, float]],
+    ) -> list[float] | None:
+        """Computes one-to-one nearest-neighbor displacements; returns None if unit count jumped > 1."""
+        if not prev_pts and not curr_pts:
+            return []
+        if not prev_pts or not curr_pts or abs(len(curr_pts) - len(prev_pts)) > 1:
+            return None
+
+        small, large = (prev_pts, curr_pts) if len(prev_pts) <= len(curr_pts) else (curr_pts, prev_pts)
+        candidates: list[tuple[float, int, int]] = []
+        for s_idx, (sx, sy) in enumerate(small):
+            for l_idx, (lx, ly) in enumerate(large):
+                candidates.append((float(np.hypot(sx - lx, sy - ly)), s_idx, l_idx))
+        candidates.sort(key=lambda item: item[0])
+
+        used_s: set[int] = set()
+        used_l: set[int] = set()
+        disps: list[float] = []
+        for dist, s_idx, l_idx in candidates:
+            if s_idx not in used_s and l_idx not in used_l:
+                used_s.add(s_idx)
+                used_l.add(l_idx)
+                disps.append(dist)
+        return disps if len(disps) == len(small) else None
+
+    def _are_point_sets_motion_settled(
+        self,
+        prev_opp: list[tuple[float, float]],
+        prev_my: list[tuple[float, float]],
+        curr_opp: list[tuple[float, float]],
+        curr_my: list[tuple[float, float]],
+        screen_w: int,
+    ) -> bool:
+        """Returns True if inter-frame box centers have settled (camera swoop & unit landing finished)."""
+        if screen_w <= 0:
+            return False
+        opp_disps = self._camp_displacements(prev_opp, curr_opp)
+        my_disps = self._camp_displacements(prev_my, curr_my)
+        if opp_disps is None or my_disps is None:
+            return False
+
+        all_disps = opp_disps + my_disps
+        if not all_disps:
+            return False
+
+        mean_disp = sum(all_disps) / float(len(all_disps))
+        peak_disp = max(all_disps)
+        return (
+            mean_disp <= (screen_w * self.SETTLED_MAX_MEAN_DISP_RATIO)
+            and peak_disp <= (screen_w * self.SETTLED_MAX_PEAK_DISP_RATIO)
+        )
+
+    def _check_battlefield_settled(
+        self,
+        raw_opp: list[tuple[float, float]],
+        raw_my: list[tuple[float, float]],
+        is_my_turn: bool,
+        screen_w: int,
+        now: float,
+    ) -> bool:
+        """Enforces the Settled Battlefield Entry Gate before initializing `StateParser` baselines.
+
+        - Standard Entry: `>= 2` consecutive frames with BOTH ally and enemy units visible AND
+          settled inter-frame center displacement (`mean <= 0.018*w`, `peak <= 0.035*w`).
+        - Explicit Turn Entry: `is_my_turn == True` with no active camera swoop from the prior frame.
+        - Anti-Deadlock Fallback: after `>= 4.5s` of seeing units (e.g. stealth / solo-core lineup),
+          allows entry once `>= 2` consecutive single-camp frames are motion-settled.
+        """
+        has_both_sides = len(raw_opp) >= 1 and len(raw_my) >= 1
+        total_raw = len(raw_opp) + len(raw_my)
+        had_prev = bool(self._entry_prev_opp or self._entry_prev_my)
+
+        if total_raw >= 1 and self._entry_first_unit_ts == 0.0:
+            self._entry_first_unit_ts = now
+
+        motion_settled = (
+            self._are_point_sets_motion_settled(
+                self._entry_prev_opp, self._entry_prev_my, raw_opp, raw_my, screen_w
+            )
+            if (had_prev and total_raw >= 1)
+            else False
+        )
+
+        # 1. Explicit ally skill-bar turn: immediate if clean start or camera motion has settled
+        if is_my_turn:
+            if not had_prev or total_raw == 0 or motion_settled:
+                return True
+            self._entry_prev_opp = raw_opp
+            self._entry_prev_my = raw_my
+            self.settled_entry_frames = 1
+            return False
+
+        if total_raw == 0:
+            self.settled_entry_frames = 0
+            self._entry_prev_opp = []
+            self._entry_prev_my = []
+            return False
+
+        # 2. Both camps visible: require >= 2 consecutive motion-settled dual-camp frames
+        if has_both_sides:
+            prev_had_both = len(self._entry_prev_opp) >= 1 and len(self._entry_prev_my) >= 1
+            if prev_had_both and motion_settled:
+                self.settled_entry_frames += 1
+            else:
+                self.settled_entry_frames = 1
+            self._entry_prev_opp = raw_opp
+            self._entry_prev_my = raw_my
+            return self.settled_entry_frames >= self.SETTLED_MIN_CONSECUTIVE_FRAMES
+
+        # 3. Anti-deadlock fallback (>= 4.5s) for extreme stealth / solo-core formations
+        if had_prev and motion_settled:
+            self.settled_entry_frames += 1
+        else:
+            self.settled_entry_frames = 1
+        self._entry_prev_opp = raw_opp
+        self._entry_prev_my = raw_my
+
+        wait_elapsed = (now - self._entry_first_unit_ts) if self._entry_first_unit_ts > 0.0 else 0.0
+        return (
+            wait_elapsed >= self.BATTLE_SETTLE_FALLBACK_SEC
+            and self.settled_entry_frames >= self.SETTLED_MIN_CONSECUTIVE_FRAMES
+        )
+
     def reset_to_blank(self, root_window: tk.Tk | None) -> None:
         """Resets battle session state and closes HUD & advice panels on match end."""
         self.stop_requested = True
         self.battle_has_started = False
         self.no_box_start_time = 0.0
-        self.consecutive_alive_frames = 0
+        self._reset_entry_gate_state()
         self.auto_executor.stop_immediately()
         self.wake_loop()
 
@@ -267,7 +442,7 @@ class AITacticalManager:
             self.stop_requested = True
             self.is_active_session = False
             self.battle_has_started = False
-            self.consecutive_alive_frames = 0
+            self._reset_entry_gate_state()
             self.no_box_start_time = 0.0
             self.latest_advice_text = ""
             self.latest_auto_action_text = ""
@@ -427,9 +602,15 @@ class AITacticalManager:
                 if self._is_cancelled():
                     break
 
-                # Fallback template capture ONLY if not already locked at 5-pick flip and still on draft screen
-                if not self.battle_has_started and not self.action_bar_detector.has_locked_templates:
-                    if (time.time() - self.session_start_time) <= 3.0 and not is_my_turn:
+                current_time = time.time()
+
+                # Fallback template capture ONLY right after 5-pick lock while still on the draft screen
+                if (
+                    from_five_picks_lock
+                    and not self.battle_has_started
+                    and not self.action_bar_detector.has_locked_templates
+                ):
+                    if (current_time - self.session_start_time) <= 2.2 and not is_my_turn:
                         if self.action_bar_detector.capture_prep_templates(
                             screen_color, our_picks=cur_my_draft, lock_on_success=True
                         ):
@@ -462,9 +643,38 @@ class AITacticalManager:
                     and not is_my_turn
                     and (current_time - self.session_start_time) < self.DRAFT_FADE_GRACE_SEC
                 ):
-                    self._wake_event.wait(timeout=0.25)
+                    self._wake_event.wait(timeout=self.POLL_ENTRY_SETTLE)
                     self._wake_event.clear()
                     continue
+
+                # Settled Battlefield Entry Gate: NEVER call `parser.parse_frame` during VS banners
+                # or opening camera swoop! Wait until units have landed and settled across >= 2 frames
+                # (or explicit ally turn / 4.5s stealth fallback), then reset baseline cleanly on entry.
+                if not self.battle_has_started:
+                    raw_opp_pts, raw_my_pts = self._extract_valid_combat_points(boxes_data, screen_w, screen_h)
+                    if not self._check_battlefield_settled(
+                        raw_opp_pts, raw_my_pts, is_my_turn, screen_w, current_time
+                    ):
+                        if (current_time - self.session_start_time) >= 90.0:
+                            self.reset_to_blank(root_window)
+                            break
+                        self._wake_event.wait(timeout=self.POLL_ENTRY_SETTLE)
+                        self._wake_event.clear()
+                        continue
+
+                    with self.models.yolo_lock:
+                        self.parser.reset_baseline()
+                    self._reset_entry_gate_state()
+                    self.battle_has_started = True
+                    self.no_box_start_time = 0.0
+                    if self.auto_battle_enabled:
+                        self.auto_executor.reset_for_match()
+                        self.auto_executor.start_kill_switch_monitor(
+                            on_emergency_stop=self._handle_emergency_stop
+                        )
+                        self.auto_executor.is_game_window_foreground(
+                            hwnd, allow_reclaim_from_self=True
+                        )
 
                 my_status, opp_status = self.parser.parse_frame(
                     cur_my_draft, cur_opp_draft, boxes_data, screen_w, screen_height=screen_h
@@ -474,27 +684,6 @@ class AITacticalManager:
                 opp_alive_count = sum(1 for info in opp_status.values() if info.get("alive", False))
                 total_alive = my_alive_count + opp_alive_count
                 current_time = time.time()
-
-                # Immediately show AITacticalUI & BattleOverlayUI as soon as any unit or skill bar appears!
-                if not self.battle_has_started:
-                    if total_alive >= 1 or is_my_turn:
-                        self.battle_has_started = True
-                        self.no_box_start_time = 0.0
-                        if self.auto_battle_enabled:
-                            self.auto_executor.reset_for_match()
-                            self.auto_executor.start_kill_switch_monitor(
-                                on_emergency_stop=self._handle_emergency_stop
-                            )
-                            self.auto_executor.is_game_window_foreground(
-                                hwnd, allow_reclaim_from_self=True
-                            )
-                    else:
-                        if (current_time - self.session_start_time) >= 90.0:
-                            self.reset_to_blank(root_window)
-                            break
-                        self._wake_event.wait(timeout=0.25)
-                        self._wake_event.clear()
-                        continue
 
                 need_ai_win = self.presenter.ai_ui is None or not self.presenter.ai_ui.winfo_exists()
                 need_ov_win = self.show_overlay and (
@@ -762,7 +951,7 @@ class AITacticalManager:
                 self.battle_thread.join(timeout=1.0)
 
             self.battle_has_started = False
-            self.consecutive_alive_frames = 0
+            self._reset_entry_gate_state()
             self.no_box_start_time = 0.0
 
             with self._state_lock:

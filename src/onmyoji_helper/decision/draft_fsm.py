@@ -306,6 +306,7 @@ class DraftStateMachine:
                             if not any(bkw in full_text_opp for bkw in ("禁", "禁選", "禁选", "禁用", "加禁")):
                                 if (
                                     short_name != self.base_opp_ban
+                                    and short_name != self.extra_opp_ban
                                     and short_name != self.remembered_opp_ban
                                     and short_name != my_ban
                                     and short_name not in self.opp_draft
@@ -324,6 +325,7 @@ class DraftStateMachine:
                     if full_name in text and short_name:
                         if (
                             short_name != self.base_opp_ban
+                            and short_name != self.extra_opp_ban
                             and short_name != self.remembered_opp_ban
                             and short_name != my_ban
                             and short_name not in self.my_draft

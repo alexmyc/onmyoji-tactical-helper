@@ -86,24 +86,25 @@ All training records and evaluation curves are archived in [`docs/model_artifact
 
 ![YOLOv8n Validation Confusion Matrix](model_artifacts/confusion_matrix.png)
 
-### 3.2 2D Partial Affine Stabilization & `3.5s` Occlusion Continuity (`StateParser`)
-During 5v5 combat, ultimate animations trigger camera zoom/pan motion, `±4 px` bounding-box jitter, and multi-second particle blackouts:
+### 3.2 Settled Battlefield Entry Gate, 2D Partial Affine Stabilization & `3.5s` Occlusion Continuity
+During match entry and 5v5 combat, VS transition banners, opening camera swoops, `±4 px` bounding-box jitter, and multi-second ultimate blackouts challenge naive frame-by-frame trackers:
 
-1. **Dynamic Baseline Anchoring**: Once 5 units of a camp are localized, `StateParser` locks an initial horizontal baseline $\{p_i^{(0)}\}_{i=1}^5$ (automatically rescaling anchors proportionally if the window is resized mid-match).
-2. **2D Partial Affine Camera Solve**: Whenever at least 3 units are visible on frame $t$, `cv2.estimateAffinePartial2D` solves the 4-DoF transformation matrix $\mathbf{H}_t \in \mathbb{R}^{2 \times 3}$ (scale, rotation, translation) mapping baseline anchors to current frame coordinates, projecting occluded unit positions $\hat{p}_k^{(t)}$:
+1. **Settled Battlefield Entry Gate (`AITacticalManager`)**: When Yellow or Red Mode is pre-armed during Ban/Pick, `AITacticalManager` withholds `StateParser` baseline initialization throughout the `2.5s` draft card fade-out, VS banner, and high-speed opening camera swoop—requiring **`>= 2` consecutive dual-camp frames with settled center displacement** (`mean <= 0.018w`, `peak <= 0.035w`), an explicit Sobel-verified ally turn (`is_my_turn`), or a `4.5s` motion-settled fallback for stealth/solo-core formations before calling `parser.reset_baseline()` and opening floating HUDs.
+2. **Dynamic Perspective Baseline & Edge-Slot Backfill (`StateParser`)**: Once 5 distinct units (`gap >= 0.03w`) of a camp are localized, `StateParser` anchors their formation baseline $\{p_i^{(0)}\}_{i=1}^5$—refreshing enemy baselines whenever all 5 enemies appear in a shifted combat camera perspective, widening outer left/right enemy radii (`0.115w` vs. `0.075w` center) against 3D perspective foreshortening, dynamically backfilling newly revealed outer edge slots, and rescaling coordinates proportionally on live window resize.
+3. **2D Partial Affine Camera Solve**: Whenever at least 3 units are visible on frame $t$, `cv2.estimateAffinePartial2D` pairs smoothed correspondence hints with coherent baseline anchors to solve the 4-DoF transformation matrix $\mathbf{H}_t \in \mathbb{R}^{2 \times 3}$ (scale, rotation, translation), projecting occluded unit positions $\hat{p}_k^{(t)}$:
 
 $$
 \hat{p}_k^{(t)} = \mathbf{H}_t \begin{bmatrix} p_{k,x}^{(0)} \\ p_{k,y}^{(0)} \\ 1 \end{bmatrix}
 $$
 
-3. **Symmetric EMA Trajectories & `3.5s` Grace Recovery**: Both ally and enemy camps maintain exponential moving average positions (`smooth_pos_my`, `smooth_pos_opp`), suppressing frame-to-frame detection jitter by `> 35%`. If a unit vanishes due to ultimate VFX ($\Delta t < 3.5\text{ s}$), its alive state and coordinates recover via $\hat{p}_k^{(t)} \to \text{EMA}_k \to p_k^{(0)}$, maintaining `100%` slot continuity (`< 10 px` mean error under `±4 px` noise + random dropouts in `tests/test_vision_synthetic_regression.py`) before transitioning genuinely defeated units ($\Delta t \ge 3.5\text{ s}$) to `alive = False`.
+4. **Symmetric EMA Trajectories & `3.5s` Grace Recovery**: Both ally and enemy camps maintain exponential moving average positions (`smooth_pos_my`, `smooth_pos_opp`), suppressing frame-to-frame detection jitter by `> 35%`. If a unit vanishes due to ultimate VFX ($\Delta t < 3.5\text{ s}$), its alive state and coordinates recover via $\hat{p}_k^{(t)} \to \text{EMA}_k \to p_k^{(0)}$, maintaining `100%` slot continuity (`< 10 px` mean error under `±4 px` noise + random dropouts in `tests/test_vision_synthetic_regression.py`) before transitioning genuinely defeated units ($\Delta t \ge 3.5\text{ s}$) to `alive = False`.
 
-### 3.3 Circumferential Sobel Turn Verifier & Cross-Frame Temporal `RapidOCR` Gate
+### 3.3 Circumferential Sobel Turn Verifier & Adaptive Temporal `RapidOCR` Gate
 - **`TurnDetector`**: Combines `CLAHE` (`clipLimit=2.5`), `HoughCircles`, and a **16-point circumferential Sobel gradient check** (`>= 7/16` perimeter samples with $\|\nabla I\| \ge 32.0$ plus pairwise radius/vertical colinearity `r_diff <= 12%`, `y_diff <= 8%`), rejecting full-screen flashbang washouts while distinguishing 3- vs. 4-skill layouts and HSV availability (`V_mean >= 75`, `V_90 >= 110`, `S_mean >= 30 | S_85 >= 45`).
-- **`DraftOcrScanner`**: Resizes the opponent ROI (`1.30x` linear upscale, or normalized to `640 px` width on narrow windows), horizontally stitches the aligned ally column (`np.hstack`) for a single `RapidOCR` pass, and enforces a **two-tier + multi-frame temporal consistency gate** over `known_tokens` injected from `ShikigamiRepository`:
-  - `score >= 0.65`: immediate single-frame acceptance;
-  - `0.35 <= score < 0.65` and matching `known_tokens`: held until observed across **`min_consecutive_frames = 2` consecutive scans** of the same column (bypassing static motion-diff skipping while a streak is pending), filtering out transient 1-frame background flickers (`火`, `白`) while reliably confirming genuine single-character picks (`季`, `瀧`);
-  - `score < 0.35` or non-matching `< 0.65`: discarded immediately.
+- **`DraftOcrScanner` & `DraftStateMachine`**: Applies **adaptive ROI height scaling** (`compute_adaptive_opp_size`: upscales shrunk `< 380 px` ROIs to `400 px` via `INTER_LINEAR`, preserves `1:1` native pixels across `380..460 px`, and downscales `> 460 px` `1080p+` ROIs to `440 px` via `INTER_AREA` so strokes match CRNN's `32–48 px` receptive field), adds `10 px` top/right border padding for DBNet edge detection, keeps full dual-column scanning active for `25s` after Pick 5 to capture Post-5-Pick Extra Bans (`加禁`), and enforces a **two-tier + multi-frame temporal consistency gate** over `known_tokens` injected from `ShikigamiRepository`:
+  - `score >= 0.42` (`DEFAULT_MIN_OCR_CONFIDENCE`): immediate single-frame acceptance;
+  - `0.28 <= score < 0.42` and matching `known_tokens`: held until observed across **`min_consecutive_frames = 2` consecutive scans** of the same column (bypassing `INTER_AREA` mean + `99.5`th-percentile peak motion-diff skipping while a streak is pending), filtering out transient 1-frame background flickers (`火`, `白`) while reliably confirming genuine single-character picks (`季`, `瀧`);
+  - `score < 0.28` or non-matching `< 0.42`: discarded immediately.
 
 ---
 
@@ -147,8 +148,8 @@ Screen coordinates are translated via `ClientToScreen` and clamped within the in
 | :--- | :--- | :--- |
 | **`MainThread` (Tkinter)** | `50 ms` UI queue drain + `.after(0)` | Sole owner of Tkinter widgets and Canvas primitives; floating panels apply 64-bit safe `WS_EX_NOACTIVATE` post-`deiconify()`. |
 | **`ocr_worker`** | `0.9s / 1.3s / 2.5s / 4.5s` | Executes GDI draft capture, motion-diff gating, `RapidOCR` (2-frame temporal gate), and `DraftStateMachine`; publishes tuples via `queue.Queue`. |
-| **`BattleCoordinatorLoop`** | `0.25s` (ally) / `0.60s` (enemy) | Acquires `yolo_lock` for `YOLOv8n` + affine tracking; guards shared slot dictionaries via re-entrant `_state_lock (RLock)`. |
-| **`AsyncGemmaWorker`** | On turn edge (`>= 3.0s` cooldown) | Acquires independent `llm_lock` for Gemma-4 GGUF completion so LLM prefill never blocks `0.25s` HUD tracking. |
+| **`BattleCoordinatorLoop`** | `0.20s` (ally) / `0.35s` (enemy) | Enforces Settled Battlefield Gate, acquires `yolo_lock` for `YOLOv8n` + affine tracking, and guards shared slot dictionaries via `_state_lock (RLock)`. |
+| **`AsyncGemmaWorker`** | On turn edge (`>= 3.0s` cooldown) | Acquires independent `llm_lock` for Gemma-4 GGUF completion so LLM prefill never blocks `0.20s` HUD tracking. |
 | **`RedModeKillSwitch`** | `50 ms` `GetAsyncKeyState` poll | Monitors `F12` / `ESC` override hotkeys; increments `ModeController._transition_epoch` and atomically disarms `auto_battle_enabled`. |
 
 ---

@@ -93,6 +93,7 @@ def _draft_ocr_worker(
     logger.info("🚀 RapidOCR 背景掃描執行緒已啟動...")
 
     last_window_wh: tuple[int, int] = (0, 0)
+    last_synced_draft: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
     logged_capture_fail = False
     logged_black_frame = False
     logged_first_ocr = False
@@ -112,6 +113,7 @@ def _draft_ocr_worker(
             scanner.reset_motion_cache()
             mode_controller.clear_draft_data()
             tactical_mgr.reset_for_next_match()
+            last_synced_draft = ((), ())
             push_ui(None, [], [], [], [], f"已重置，當前數據：{ui_system_choice}")
 
         poll_interval = fsm.get_recommended_poll_interval(
@@ -182,11 +184,13 @@ def _draft_ocr_worker(
             if snapshot.should_reset_battle:
                 mode_controller.clear_draft_data()
                 tactical_mgr.reset_for_next_match()
+                last_synced_draft = ((), ())
 
             if skip_ui_refresh:
                 time.sleep(poll_interval)
                 continue
 
+            cur_draft_sig = (tuple(snapshot.my_draft), tuple(snapshot.opp_draft))
             if snapshot.just_completed_five_picks:
                 # Wait ~0.45s for the 5th pick's flip animation to settle on the draft screen,
                 # then lock all 5 ally portrait templates (`ActionBarDetector`) regardless of mode!
@@ -201,6 +205,23 @@ def _draft_ocr_worker(
                     draft_bgr,
                     hwnd,
                 )
+                last_synced_draft = cur_draft_sig
+            elif fsm.has_triggered_five_picks and cur_draft_sig != last_synced_draft:
+                # Sync late-flipping ally 5th pick (and lock portraits if still on draft screen)
+                if (
+                    len(snapshot.my_draft) == 5
+                    and not tactical_mgr.action_bar_detector.has_locked_templates
+                    and not tactical_mgr.battle_has_started
+                ):
+                    tactical_mgr.capture_draft_templates(frame.bgr, snapshot.my_draft)
+                mode_controller.update_saved_draft(
+                    ui_app.root,
+                    snapshot.my_draft,
+                    snapshot.opp_draft,
+                    hwnd,
+                )
+                tactical_mgr.update_live_draft(snapshot.my_draft, snapshot.opp_draft)
+                last_synced_draft = cur_draft_sig
 
             if snapshot.opp_ban:
                 my_recs, opp_preds, match_type = get_recommendation(
@@ -210,8 +231,9 @@ def _draft_ocr_worker(
                     my_draft=snapshot.my_draft,
                     my_ban=my_ban,
                 )
-                my_recs = [c for c in my_recs if c != my_ban and c != snapshot.opp_ban]
-                opp_preds = [c for c in opp_preds if c != my_ban and c != snapshot.opp_ban]
+                banned_tokens = {tok.strip() for tok in snapshot.opp_ban.split("+") if tok.strip()} | {my_ban}
+                my_recs = [c for c in my_recs if c not in banned_tokens]
+                opp_preds = [c for c in opp_preds if c not in banned_tokens]
                 push_ui(
                     snapshot.opp_ban,
                     snapshot.opp_draft,

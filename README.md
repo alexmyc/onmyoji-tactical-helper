@@ -37,13 +37,13 @@
 ## Key Engineering Highlights
 
 - **Multimodal Edge-AI Perception & Reasoning**
-  - **Ban/Pick Drafting Phase**: Pairs horizontally stitched dual-column `RapidOCR` with **two-tier + 2-frame temporal consistency filtering** (`>= 0.65` immediate pass; `0.35..0.65` repository-injected tokens such as `季` or `瀧` require `2` consecutive frames to eliminate single-frame background hallucinations) and a deterministic `DraftStateMachine` enforcing a strict **Ban Hard-Gate** ahead of a **rule-based, dependency-aware XMind Counter Engine**.
-  - **5v5 Combat Phase**: Fuses **custom-trained `YOLOv8n`** unit detection, `cv2.estimateAffinePartial2D` camera-shake compensation, symmetric **3.5s ultimate-VFX occlusion EMA memory**, circumferential Sobel-verified `HoughCircles` turn/skill-slot geometry, and contrast-gated avatar template matching.
+  - **Ban/Pick Drafting Phase**: Pairs adaptive-resolution dual-column `RapidOCR` (`400px` `INTER_LINEAR` upscale on shrunk `< 380px` ROIs, `1:1` native pixels at `720p–833p`, `440px` `INTER_AREA` downscale on `1080p+` ROIs + `10px` DBNet border padding) with **two-tier + 2-frame temporal consistency filtering** (`>= 0.42` immediate pass; `0.28..0.42` repository-injected tokens such as `季` or `瀧` require `2` consecutive frames to eliminate single-frame background hallucinations) and a deterministic `DraftStateMachine` enforcing Opening Ban + `25s` Post-5-Pick Extra-Ban (`加禁`) tracking ahead of a **rule-based, dependency-aware XMind Counter Engine**.
+  - **5v5 Combat Phase**: Guards battle entry with a **Settled Battlefield Camera Gate** (`>= 2` consecutive dual-camp motion-settled frames or explicit `is_my_turn` / `4.5s` stealth fallback before locking baselines so VS banners and opening camera swoops never pollute slot anchors), then fuses **custom-trained `YOLOv8n`** unit detection, `cv2.estimateAffinePartial2D` camera-shake compensation, live 5-enemy perspective refresh + `0.115w` outer-slot tolerance, symmetric **3.5s ultimate-VFX occlusion EMA memory**, circumferential Sobel-verified `HoughCircles` turn/skill-slot geometry, and locked 5-pick avatar template matching (`CONF_THRESHOLD = 0.15`).
   - **Hardware-Tiered Local LLM**: Profiles CUDA VRAM and host RAM at runtime to offload **Gemma-4 (`Q4_K_M` GGUF)** onto NVIDIA GPUs or fall back transparently to a zero-latency, zero-VRAM symbolic rule engine.
 
 - **OS-Level Symbiosis & Low-Overhead Scheduling**
   - Lowers its own Windows scheduling class to `BELOW_NORMAL_PRIORITY_CLASS` and caps OpenMP, MKL, OpenBLAS, OpenCV, and PyTorch worker pools (`1–2` threads) to prevent CPU contention against the foreground rendering thread.
-  - Applies localized `120×80` Gaussian motion-diff gating to skip `> 75%` of redundant OCR passes on static frames, paired with phase-adaptive polling (`0.25s` active turn / `0.60s` enemy turn / `4.5s` in-battle idle) and deterministic `finally`-block GDI handle cleanup.
+  - Applies localized `120×80` `INTER_AREA` Gaussian mean + `99.5`th-percentile peak motion-diff gating to skip redundant OCR passes on static frames while catching localized card flips, paired with phase-adaptive polling (`0.20s` active turn / `0.35s` enemy turn / `4.5s` in-battle idle) and deterministic `finally`-block GDI handle cleanup.
 
 - **Mixed-DPI Coordinate Projection & Human-in-the-Loop Override Controls**
   - Shares a single physical coordinate projection (`project_cropped_to_physical_client`) across the click-through HUD (`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE`) and UI dispatch layer—maintaining 1:1 pixel alignment across `100% / 125% / 150% / 200%` DWM DPI scaling, `16:10` letterboxes, and negative-coordinate multi-monitor desktops.
@@ -130,20 +130,20 @@ Full Ultralytics training configuration ([args.yaml](docs/model_artifacts/args.y
 | **`YOLOv8n` 5v5 Unit Detector (`best.pt` / `last.pt`)** | **Peak Ep.98 `mAP@50`: `99.5%` (`mAP@50-95`: `60.1%`)** · **Final Ep.150 `mAP@50`: `94.4%` (`mAP@50-95`: `52.2%`)** | Validation split metrics in [results.csv](docs/model_artifacts/results.csv); tight-IoU variance from ornate skins/halos is smoothed downstream by EMA + affine slot anchors |
 | **Noisy 2D Affine + `3.5s` Occlusion Tracker (`StateParser`)** | **`100%` slot retention** (`< 10 px` mean error under `±4 px` jitter + dropouts) | `cv2.estimateAffinePartial2D` + EMA suppresses detection jitter by `> 35%` and bridges `< 3.5s` ultimate-VFX blackouts (`tests/test_vision_synthetic_regression.py`) |
 | **Turn & Skill-Bar Verifier (`TurnDetector`)** | **16-pt Sobel ring (`>= 7/16` hits) + HSV gate** | Rejects full-screen flashbang washouts (`0` false triggers in synthetic regression) while resolving 3- vs. 4-skill button layouts |
-| **Draft `RapidOCR` Temporal Whitelist Gate** | **`>= 0.65` immediate · `0.35..0.65` 2-frame streak** | Filters single-frame background flickers (`火`, `白`) while confirming persistent single-char picks (`季`, `瀧`) across `2` consecutive scans |
+| **Draft `RapidOCR` Temporal Whitelist Gate** | **`>= 0.42` immediate · `0.28..0.42` 2-frame streak** | Adaptive `400–440px` ROI scaling + `2`-frame verification filters 1-frame background flickers (`火`, `白`) while confirming `季`, `瀧`, Opening Ban & Post-5-Pick `加禁` |
 
 ### 2. Reproducible Offline Microbenchmarks & End-to-End Pipeline Latency (`P50 / P95 / P99`)
 Measured offline on Python `3.12.1` (`Windows x64`) via [scripts/run_benchmarks.py](scripts/run_benchmarks.py) — reproduce locally anytime with `python scripts/run_benchmarks.py` (raw output in [docs/BENCHMARKS.json](docs/BENCHMARKS.json)):
 
 | Pipeline Stage (`scripts/run_benchmarks.py`) | P50 (ms) | P95 (ms) | P99 (ms) | Mean (ms) |
 | :--- | :---: | :---: | :---: | :---: |
-| **`xmind_counter_tree_scoring`** (viability decay + mirror check) | **`0.065`** | **`0.066`** | **`0.096`** | `0.065` |
-| **`shikigami_repo_lru_lookup`** (`@lru_cache` tag query) | **`< 0.001`** | **`< 0.001`** | **`< 0.001`** | `< 0.001` |
-| **`noisy_2d_affine_spatial_tracker`** (`±4 px` noise + affine + EMA) | **`0.273`** | **`0.298`** | **`0.325`** | `0.273` |
-| **`mixed_dpi_coordinate_projection`** (`125% DPI` + `16:10` letterbox) | **`0.003`** | **`0.003`** | **`0.003`** | `0.003` |
-| **`draft_roi_motion_diff_gate`** (`120×80` Gaussian absdiff gate) | **`0.020`** | **`0.021`** | **`0.025`** | `0.020` |
-| **`turn_detector_sobel_hsv_full_pass`** (`1280×720` Hough + Sobel + HSV) | **`2.212`** | **`3.350`** | **`4.152`** | `2.377` |
-| **`e2e_synthetic_frame_to_hud`** (`1280×720` Frame -> CV + Rule + HUD + `125%` DPI) | **`2.538`** | **`3.425`** | **`4.230`** | `2.658` |
+| **`xmind_counter_tree_scoring`** (viability decay + mirror check) | **`0.083`** | **`0.125`** | **`0.162`** | `0.088` |
+| **`shikigami_repo_lru_lookup`** (`@lru_cache` tag query) | **`0.001`** | **`0.001`** | **`0.001`** | `0.001` |
+| **`noisy_2d_affine_spatial_tracker`** (`±4 px` noise + affine + EMA) | **`0.325`** | **`0.498`** | **`0.969`** | `0.357` |
+| **`mixed_dpi_coordinate_projection`** (`125% DPI` + `16:10` letterbox) | **`0.003`** | **`0.004`** | **`0.005`** | `0.003` |
+| **`draft_roi_motion_diff_gate`** (`120×80` `INTER_AREA` Gaussian absdiff gate) | **`0.550`** | **`0.729`** | **`1.461`** | `0.589` |
+| **`turn_detector_sobel_hsv_full_pass`** (`1280×720` Hough + Sobel + HSV) | **`3.228`** | **`4.854`** | **`6.471`** | `3.462` |
+| **`e2e_synthetic_frame_to_hud`** (`1280×720` Frame -> CV + Rule + HUD + `125%` DPI) | **`4.007`** | **`5.920`** | **`8.016`** | `4.233` |
 
 *Live runtime reference (RTX 3080 Laptop GPU, `1920×1200 @ 125% DPI`): GDI `BitBlt` + border crop `~1.8 ms`, `YOLOv8n` forward pass `~8 ms` (CUDA `640px`) / `~28 ms` (CPU `480px`), `SafetyGuard` hotkey poll `50 ms`, idle background CPU `< 1.5%`.*
 
@@ -170,7 +170,7 @@ python run_app.py --demo
 Opens the **Draft Window**, **AI Tactical Panel**, and **Interactive Match Sandbox** side-by-side using the built-in Public Sandbox dataset (`27` sample aliases, `13` combat profiles, `2` playbooks) with real-time English inspector telemetry.
 
 ### 2. Run QA Gate (Tests, Coverage Transparency, Mypy, Ruff & Benchmarks)
-Install QA/development tools from `requirements-dev.txt` and run all **29** offline tests:
+Install QA/development tools from `requirements-dev.txt` and run all **37** offline tests:
 ```powershell
 pip install -r requirements-dev.txt
 pytest -v --cov=onmyoji_helper --cov-report=term-missing --cov-fail-under=70
@@ -178,7 +178,7 @@ mypy src
 ruff check src tests scripts run_app.py build_release.py
 python scripts/run_benchmarks.py
 ```
-- **Coverage Scope Transparency**: Headless CI enforces **`>= 70%`** coverage across the decoupled core decision, vision, domain, automation, and sync-parser layers (currently **`78.8%`** across `2,030` statements). Full-repository line coverage—when counting interactive Tkinter GUI windows, Win32 GDI/SendInput syscalls, and CUDA/GGUF model loaders (`4,258` total statements)—stands at **`47.3%`**.
+- **Coverage Scope Transparency**: Headless CI enforces **`>= 70%`** coverage across the decoupled core decision, vision, domain, automation, and sync-parser layers (currently **`81.8%`** across `2,223` statements). Full-repository line coverage—when counting interactive Tkinter GUI windows, Win32 GDI/SendInput syscalls, and CUDA/GGUF model loaders (`4,760` total statements)—stands at **`60.0%`**.
 
 ### 3. Live HUD Execution & Optional Private Cloud Sync (`.env`)
 - **Public Sandbox Mode (Default)**: Launching `python run_app.py` without `.env` loads the built-in sample dataset (`public_demo_data.py`: `27` aliases, `13` tags, `2` playbooks).
@@ -227,7 +227,7 @@ onmyoji-tactical-helper/
 │       ├── infra/                     # EnvLoader, Win32 APIs, BitBlt, XOR cache sync & VRAM guard
 │       ├── ui/                        # MainWindow, AITacticalUI, BattleOverlayUI & DemoSandbox
 │       └── app/                       # Runtime bootstrap, ModeController & BattleCoordinator
-├── tests/                             # Offline unit, E2E & noisy synthetic CV suite (29 tests)
+├── tests/                             # Offline unit, E2E & noisy synthetic CV suite (37 tests)
 └── .github/workflows/ci.yml           # GitHub Actions CI (Ruff + Mypy + Pytest >=70% Core Coverage)
 ```
 

@@ -238,9 +238,11 @@ def get_recommendation(
     if len(my_picks) >= 5:
         return ["【武運亨通，旗開得勝】"], [], "選卡結束，準備戰鬥"
 
-    opp_ban_card = _normalize_ban_name(current_ban)
+    raw_opp_ban = _normalize_ban_name(current_ban)
+    opp_ban_parts = [p.strip() for p in raw_opp_ban.split("+") if p.strip()]
+    opp_ban_card = opp_ban_parts[0] if opp_ban_parts else ""
     my_ban_card = _normalize_ban_name(my_ban)
-    banned_cards: set[str] = {c for c in (opp_ban_card, my_ban_card) if c}
+    banned_cards: set[str] = {c for c in (*opp_ban_parts, my_ban_card) if c}
     locked_unavailable: set[str] = banned_cards | my_picks_set | opp_picks_set
 
     opp_ban_key = f"Ban{opp_ban_card}" if opp_ban_card else ""

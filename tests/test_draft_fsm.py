@@ -1,7 +1,9 @@
 """Unit tests for the pure deterministic Ban/Pick DraftStateMachine."""
 
+from onmyoji_helper.decision.draft_engine import build_database, get_recommendation
 from onmyoji_helper.decision.draft_fsm import DraftStateMachine
 from onmyoji_helper.domain.models import DraftPhase
+from onmyoji_helper.domain.public_demo_data import get_public_demo_bundle
 
 SORTED_DICT = [
     ("封陽君", "封"),
@@ -145,3 +147,18 @@ def test_opening_ban_icon_only_reveal_and_post_five_pick_extra_ban() -> None:
     assert extra_snap.should_reset_battle is False
     assert extra_snap.opp_ban == "封+骷"
     assert len(extra_snap.opp_draft) == 5
+
+    # 4. Compound post-pick Ban string ('Ban封+骷') still resolves primary 'Ban封' XMind root & excludes both banned cards
+    systems, _, multi_shorts, _ = get_public_demo_bundle()
+    first_sys = next(iter(systems.values()))
+    db = build_database(first_sys["raw_data"], sorted(multi_shorts, key=len, reverse=True))
+    recs, preds, status = get_recommendation(
+        db=db,
+        current_ban=f"Ban{extra_snap.opp_ban}",
+        opp_draft=["葛", "神", "石"],
+        my_draft=["離", "百羽"],
+        my_ban="禪",
+    )
+    assert "封" not in recs and "骷" not in recs and "禪" not in recs
+    assert "封" not in preds and "骷" not in preds
+    assert status != ""
