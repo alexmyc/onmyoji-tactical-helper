@@ -65,3 +65,36 @@ def test_affine_camera_pan_and_live_window_resize_rescaling() -> None:
     assert parser.baseline_w == 1704 and parser.baseline_h == 960
     assert all(v["alive"] for v in opp_res.values())
     assert all(v["alive"] for v in my_res.values())
+
+
+def test_outlier_jump_clamping_and_monotonic_slot_lock_stability() -> None:
+    parser = StateParser()
+    w, h = 1144, 648
+
+    # 1. Right-hand action-bar false detection (cx = 0.96 * w) must be filtered out and never corrupt baseline
+    dirty_boxes = [
+        {"cls": 0, "cx": w * r, "cy": h * 0.30} for r in (0.48, 0.57, 0.66, 0.75)
+    ] + [{"cls": 0, "cx": w * 0.96, "cy": h * 0.30}]
+    parser.parse_frame(MY_DRAFT, OPP_DRAFT, dirty_boxes, w, h, now=1.0)
+    assert parser.is_opp_baseline_set is False
+
+    # 2. Clean 5v5 formation locks baseline
+    clean_boxes = _make_initial_boxes(w, h)
+    _, opp_base = parser.parse_frame(MY_DRAFT, OPP_DRAFT, clean_boxes, w, h, now=2.0)
+    assert parser.is_opp_baseline_set is True
+    slot2_base_x, slot2_base_y = opp_base["Slot 2"]["pos"]
+
+    # 3. Single-frame outlier spike on Enemy Slot 2 (+62px jump within radius) is clamped smoothly
+    spiked_boxes = []
+    for b in clean_boxes:
+        if b["cls"] == 0 and abs(float(b["cx"]) - w * 0.66) < 5:
+            spiked_boxes.append({"cls": 0, "cx": float(b["cx"]) + 60.0, "cy": float(b["cy"]) + 25.0})
+        else:
+            spiked_boxes.append(dict(b))
+    _, opp_spiked = parser.parse_frame(MY_DRAFT, OPP_DRAFT, spiked_boxes, w, h, now=2.2)
+    jump_dx = abs(opp_spiked["Slot 2"]["pos"][0] - slot2_base_x)
+    jump_dy = abs(opp_spiked["Slot 2"]["pos"][1] - slot2_base_y)
+    assert jump_dx <= 22 and jump_dy <= 15
+
+    # 4. Crossed adjacent candidates cannot swap Slot 2 (left) and Slot 1 (right) X-order
+    assert opp_spiked["Slot 2"]["pos"][0] < opp_spiked["Slot 1"]["pos"][0]

@@ -71,3 +71,39 @@ def test_full_five_pick_progression_and_settlement_reset() -> None:
     assert end_snap.opp_ban is None
     assert end_snap.opp_draft == []
     assert end_snap.should_reset_battle is True
+
+
+def test_vs_banner_lobby_and_combat_debuffs_never_reset_active_five_pick_match() -> None:
+    fsm = DraftStateMachine()
+    fsm.step(_tok("禁選封陽君"), [], SORTED_DICT, my_ban="禪", now=10.0)
+    picks_opp = ["不知火", "鈴鹿御前", "須佐之男", "大夜摩天閻魔", "八岐大蛇"]
+    picks_my = ["須佐之男", "不知火", "荒骷髏", "鈴鹿御前", "八岐大蛇"]
+    for idx in range(5):
+        snap, _ = fsm.step(
+            _tok(*picks_opp[: idx + 1]),
+            _tok(*picks_my[: idx + 1]),
+            SORTED_DICT,
+            my_ban="禪",
+            now=12.0 + idx,
+        )
+    assert snap.just_completed_five_picks is True
+    assert snap.phase == DraftPhase.IN_BATTLE
+
+    # 1. Right after 5th pick (VS Loading Banner showing '大名士' / '陰陽師'), MUST NOT reset!
+    vs_snap, _ = fsm.step(_tok("大名士 陰陽師"), [], SORTED_DICT, my_ban="禪", now=22.0, is_combat_active=False)
+    assert vs_snap.should_reset_battle is False
+    assert vs_snap.phase == DraftPhase.IN_BATTLE
+    assert len(vs_snap.opp_draft) == 5
+
+    # 2. During active 5v5 combat (even >60s later), rank badges or combat debuffs ('禁療', '禁錮') MUST NOT reset!
+    combat_snap, _ = fsm.step(
+        _tok("名士 禁療 禁錮"), [], SORTED_DICT, my_ban="禪", now=95.0, is_combat_active=True
+    )
+    assert combat_snap.should_reset_battle is False
+    assert combat_snap.phase == DraftPhase.IN_BATTLE
+    assert len(combat_snap.my_draft) == 5
+
+    # 3. Once combat has ended (is_combat_active=False) and lobby guard elapsed, returning to lobby resets cleanly
+    lobby_snap, _ = fsm.step(_tok("名士"), [], SORTED_DICT, my_ban="禪", now=100.0, is_combat_active=False)
+    assert lobby_snap.should_reset_battle is True
+    assert lobby_snap.opp_draft == []

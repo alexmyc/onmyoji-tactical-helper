@@ -1,11 +1,11 @@
 """Thread-Safe Operational Mode Controller for Onmyoji Tactical Helper.
 
-Manages instant transitions across Green, Yellow, and Red modes:
-- Switching `Yellow <-> Red` flips auto-execution & focus in-place without tearing down
-  `BattleOverlayUI`, `AITacticalUI`, or pre-warmed GPU models.
-- Switching `Green -> Yellow/Red` immediately opens `BattleOverlayUI` & `AITacticalUI` and
-  wakes the vision loop (even if switched mid-match without prior draft OCR), keeping models
-  warm across toggles for zero-lag response.
+Manages transitions across Green, Yellow, and Red modes under a strict Battle Lifecycle Gate:
+- Before 5-pick draft lock (`saved_draft_data is None`), switching to Yellow or Red arms the
+  mode and pre-warms GPU models in the background while keeping `AITacticalUI` and
+  `BattleOverlayUI` strictly hidden.
+- Once 5 picks lock and 5v5 battle entry is confirmed, `Yellow <-> Red` flips auto-execution
+  in-place without tearing down `BattleOverlayUI`, `AITacticalUI`, or pre-warmed GPU models.
 """
 
 import logging
@@ -19,7 +19,7 @@ logger = logging.getLogger("OnmyojiHelper")
 
 
 class ModeController:
-    """Synchronizes tri-state mode switches, instant HUD wakeup, and emergency downgrades."""
+    """Synchronizes tri-state mode switches, battle-gated HUD lifecycle, and emergency downgrades."""
 
     MODE_GREEN: str = OperatingMode.GREEN.value
     MODE_YELLOW: str = OperatingMode.YELLOW.value
@@ -35,7 +35,7 @@ class ModeController:
         if self.tactical_mgr and hasattr(self.tactical_mgr, "set_mode_controller"):
             self.tactical_mgr.set_mode_controller(self)
 
-        # Stores lightweight tuple: (root_window, my_draft, opp_draft, hwnd) — zero raw image retention
+        # Stores lightweight tuple: (root_window, my_draft, opp_draft, hwnd) — None before 5-pick lock
         self.saved_draft_data: tuple[tk.Tk, list[str], list[str], int] | None = None
         self.ui_app: Any | None = None
 
@@ -52,7 +52,7 @@ class ModeController:
         screen_color: Any = None,
         hwnd: int = 0,
     ) -> None:
-        """Persists lightweight 5-pick lineup metadata and triggers/updates battle analysis."""
+        """Persists lightweight 5-pick lineup metadata and launches battle tracking if in Yellow/Red."""
         with self._lock:
             self.saved_draft_data = (root_window, list(my_draft), list(opp_draft), int(hwnd))
         self.handle_five_picks(root_window, my_draft, opp_draft, screen_color, hwnd)
@@ -62,7 +62,7 @@ class ModeController:
             self.saved_draft_data = None
 
     def set_mode(self, new_mode: str) -> bool:
-        """Initiates an immediate mode transition under `_lock`."""
+        """Initiates a mode transition under `_lock` without prematurely popping battle windows."""
         target = new_mode.value if isinstance(new_mode, OperatingMode) else str(new_mode)
         with self._lock:
             if self.is_busy or target == self.current_mode:
@@ -75,14 +75,6 @@ class ModeController:
         if self.ui_app:
             self.ui_app.disable_mode_click()
             self.ui_app.set_mode_ui(target)
-            # Pre-create HUD Overlay & AI Panel immediately on main thread when entering Yellow/Red
-            if (
-                target in (self.MODE_YELLOW, self.MODE_RED)
-                and self.tactical_mgr
-                and hasattr(self.tactical_mgr, "show_windows_immediately")
-                and hasattr(self.ui_app, "root")
-            ):
-                self.tactical_mgr.show_windows_immediately(self.ui_app.root, show_overlay=True)
 
         logger.info(f"🔄 [ModeController] 切換運作模式: {old_mode} -> {target}")
         threading.Thread(
@@ -94,6 +86,7 @@ class ModeController:
         return True
 
     def _async_switch_mode(self, old_mode: str, new_mode: str, epoch: int) -> None:
+        saved: tuple[tk.Tk, list[str], list[str], int] | None = None
         try:
             # Case 1: Leaving Yellow/Red -> Green (close floating HUDs, keep models warm for next switch)
             if new_mode == self.MODE_GREEN and old_mode in (self.MODE_YELLOW, self.MODE_RED):
@@ -108,28 +101,26 @@ class ModeController:
 
             # Case 2: Entering or toggling between Yellow <-> Red
             if new_mode in (self.MODE_YELLOW, self.MODE_RED) and self.tactical_mgr:
+                has_locked_draft = saved is not None
                 if hasattr(self.tactical_mgr, "enable_mode"):
-                    self.tactical_mgr.enable_mode(new_mode)
+                    self.tactical_mgr.enable_mode(new_mode, has_locked_draft=has_locked_draft)
 
-                is_running = bool(
-                    getattr(self.tactical_mgr, "is_active_session", False)
-                    and getattr(self.tactical_mgr, "battle_thread", None) is not None
-                    and self.tactical_mgr.battle_thread.is_alive()
-                )
-                if is_running:
-                    # Seamless in-place Yellow <-> Red switch: wake loop immediately without restart!
-                    if hasattr(self.tactical_mgr, "wake_loop"):
-                        self.tactical_mgr.wake_loop()
+                if not has_locked_draft:
+                    # Strict Battle Lifecycle Gate: never pop HUD/AI panels or run YOLO before 5-pick lock!
+                    if hasattr(self.tactical_mgr, "hide_battle_windows"):
+                        self.tactical_mgr.hide_battle_windows()
                 else:
-                    r_win = (
-                        saved[0]
-                        if saved is not None
-                        else (self.ui_app.root if self.ui_app and hasattr(self.ui_app, "root") else None)
+                    is_running = bool(
+                        getattr(self.tactical_mgr, "is_active_session", False)
+                        and getattr(self.tactical_mgr, "battle_thread", None) is not None
+                        and self.tactical_mgr.battle_thread.is_alive()
                     )
-                    if r_win is not None:
-                        my_d = saved[1] if saved is not None else [f"我方{i}號" for i in range(1, 6)]
-                        opp_d = saved[2] if saved is not None else [f"敵方{i}號" for i in range(1, 6)]
-                        saved_hwnd = saved[3] if saved is not None else 0
+                    if is_running:
+                        if hasattr(self.tactical_mgr, "wake_loop"):
+                            self.tactical_mgr.wake_loop()
+                    else:
+                        assert saved is not None
+                        r_win, my_d, opp_d, saved_hwnd = saved
                         self.tactical_mgr.trigger_analysis(
                             r_win, my_d, opp_d, None, saved_hwnd, sync_wait=False
                         )
@@ -145,8 +136,12 @@ class ModeController:
                 self.ui_app.root.after(0, self.ui_app.enable_mode_click)
                 if hasattr(self.ui_app, "lbl_status") and hasattr(self.ui_app, "mode_names"):
                     mode_desc = self.ui_app.mode_names.get(new_mode, new_mode)
+                    if new_mode in (self.MODE_YELLOW, self.MODE_RED) and saved is None:
+                        status_txt = f"已切換至：{mode_desc}（待 5 手鎖陣進場後自動開啟戰術視窗）"
+                    else:
+                        status_txt = f"已切換至：{mode_desc}"
                     self.ui_app.root.after(
-                        0, lambda desc=mode_desc: self.ui_app.lbl_status.config(text=f"已切換至：{desc}")
+                        0, lambda txt=status_txt: self.ui_app.lbl_status.config(text=txt)
                     )
 
     def update_status_text(self, text: str) -> None:
@@ -202,14 +197,8 @@ class ModeController:
         with self._lock:
             mode = self.current_mode
         if mode in (self.MODE_YELLOW, self.MODE_RED) and self.tactical_mgr:
-            is_running = bool(
-                getattr(self.tactical_mgr, "is_active_session", False)
-                and getattr(self.tactical_mgr, "battle_thread", None) is not None
-                and self.tactical_mgr.battle_thread.is_alive()
+            if hasattr(self.tactical_mgr, "enable_mode"):
+                self.tactical_mgr.enable_mode(mode, has_locked_draft=True)
+            self.tactical_mgr.trigger_analysis(
+                root_window, my_draft, opp_draft, screen_color, hwnd, sync_wait=sync_wait
             )
-            if is_running and hasattr(self.tactical_mgr, "update_live_draft"):
-                self.tactical_mgr.update_live_draft(my_draft, opp_draft)
-            else:
-                self.tactical_mgr.trigger_analysis(
-                    root_window, my_draft, opp_draft, screen_color, hwnd, sync_wait=sync_wait
-                )

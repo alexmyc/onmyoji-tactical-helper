@@ -174,6 +174,9 @@ def _draft_ocr_worker(
                 ocr_my=ocr_my,
                 sorted_full_to_short=repository.sorted_full_to_short,
                 my_ban=my_ban,
+                is_combat_active=bool(
+                    tactical_mgr.is_active_session and tactical_mgr.battle_has_started
+                ),
             )
 
             if snapshot.should_reset_battle:

@@ -15,6 +15,8 @@ from onmyoji_helper.domain.models import DraftPhase, DraftSnapshot
 logger = logging.getLogger("OnmyojiHelper")
 
 BAN_KEYWORDS: tuple[str, ...] = ("禁", "禁選", "禁选", "禁用")
+# Explicit multi-char Ban headers only (never bare '禁', which appears in combat debuffs like '禁療')
+BAN_RESET_KEYWORDS: tuple[str, ...] = ("禁選", "禁选", "禁用", "對方禁", "对方禁", "我方禁")
 QUEUE_KEYWORDS: tuple[str, ...] = ("配對中", "配对中", "匹配成功")
 LOBBY_KEYWORDS: tuple[str, ...] = ("名士", "陰陽師")
 SETTLE_KEYWORDS: tuple[str, ...] = ("勝利", "失敗", "胜利", "失败")
@@ -25,6 +27,8 @@ class DraftStateMachine:
 
     IDLE_SLEEP_TIMEOUT: float = 25.0
     PARTIAL_DRAFT_TIMEOUT: float = 90.0
+    POST_FIVE_PICK_LOBBY_GUARD_SEC: float = 45.0
+    POST_FIVE_PICK_BAN_GUARD_SEC: float = 12.0
 
     def __init__(self) -> None:
         """Initializes an empty draft state machine in `SLEEP` phase."""
@@ -33,6 +37,7 @@ class DraftStateMachine:
         self.opp_draft: list[str] = []
         self.my_draft: list[str] = []
         self.has_triggered_five_picks: bool = False
+        self.five_picks_locked_time: float = 0.0
         self.in_ban_waiting: bool = False
         self.logged_ban_enter: bool = False
         self.last_wakeup_time: float = time.time()
@@ -45,6 +50,7 @@ class DraftStateMachine:
         self.opp_draft.clear()
         self.my_draft.clear()
         self.has_triggered_five_picks = False
+        self.five_picks_locked_time = 0.0
         self.in_ban_waiting = (target_phase == DraftPhase.BAN_WAITING)
         self.logged_ban_enter = False
         now = time.time()
@@ -77,6 +83,7 @@ class DraftStateMachine:
         sorted_full_to_short: Sequence[tuple[str, str]],
         my_ban: str,
         now: float | None = None,
+        is_combat_active: bool = False,
     ) -> tuple[DraftSnapshot, bool]:
         """Advances the draft FSM given OCR token results from opponent and ally columns.
 
@@ -86,6 +93,9 @@ class DraftStateMachine:
             sorted_full_to_short: Length-descending `(full_name, short_name)` alias pairs.
             my_ban: Player's configured Ban short name for the active system.
             now: Optional injectable timestamp for deterministic testing.
+            is_combat_active: True while 5v5 YOLOv8 combat tracking is actively running,
+                preventing VS-banner / rank-header keywords (`'名士'`, `'陰陽師'`) from resetting
+                an ongoing battle.
 
         Returns:
             Tuple `(DraftSnapshot, skip_ui_refresh)` where `skip_ui_refresh=True` when a
@@ -101,6 +111,7 @@ class DraftStateMachine:
 
         if full_text_opp:
             has_ban_kw = any(kw in full_text_opp for kw in BAN_KEYWORDS)
+            has_explicit_ban_reset = any(kw in full_text_opp for kw in BAN_RESET_KEYWORDS)
 
             # 1. Explicit queue / rematch screens: reset any leftover partial/full draft
             if any(kw in full_text_opp for kw in QUEUE_KEYWORDS):
@@ -112,6 +123,7 @@ class DraftStateMachine:
                     or self.has_triggered_five_picks
                 )
                 if had_state:
+                    logger.info(f"🔄 [DraftFSM] 偵測到配對畫面，重置對局狀態 (OCR='{full_text_opp[:36]}')")
                     self.reset(
                         DraftPhase.BAN_WAITING if "匹配成功" in full_text_opp else DraftPhase.ACTIVE_DRAFT
                     )
@@ -123,23 +135,47 @@ class DraftStateMachine:
                     if "匹配成功" in full_text_opp:
                         self.in_ban_waiting = True
 
-            # 2. Lobby / rank labels: only reset after a completed 5-pick match
+            # 2. Settlement screen (victory / defeat / early surrender) — check BEFORE lobby labels!
+            elif any(kw in full_text_opp for kw in SETTLE_KEYWORDS):
+                had_state = bool(
+                    self.remembered_opp_ban
+                    or self.opp_draft
+                    or self.my_draft
+                    or self.has_triggered_five_picks
+                )
+                if had_state:
+                    logger.info(f"🏁 [DraftFSM] 偵測到對局結算畫面，重置狀態 (OCR='{full_text_opp[:36]}')")
+                self.reset(DraftPhase.SLEEP)
+                if had_state:
+                    should_reset_battle = True
+
+            # 3. Lobby / rank labels: NEVER reset on VS banner or while 5v5 combat is actively tracked!
             elif any(kw in full_text_opp for kw in LOBBY_KEYWORDS):
                 self.last_wakeup_time = now_ts
-                if (
+                completed_five = (
                     self.has_triggered_five_picks
                     or len(self.opp_draft) >= 5
                     or len(self.my_draft) >= 5
-                ):
-                    self.reset(DraftPhase.ACTIVE_DRAFT)
-                    should_reset_battle = True
+                )
+                post_lock_elapsed = (
+                    (now_ts - self.five_picks_locked_time)
+                    if self.five_picks_locked_time > 0.0
+                    else float("inf")
+                )
+                if completed_five:
+                    if not is_combat_active and post_lock_elapsed >= self.POST_FIVE_PICK_LOBBY_GUARD_SEC:
+                        logger.info(
+                            f"🏠 [DraftFSM] 對局已結束並返回鬥技大廳，重置狀態 (OCR='{full_text_opp[:36]}')"
+                        )
+                        self.reset(DraftPhase.ACTIVE_DRAFT)
+                        should_reset_battle = True
                 else:
                     self.phase = DraftPhase.ACTIVE_DRAFT
-                if has_ban_kw and not self.remembered_opp_ban:
-                    self.in_ban_waiting = True
-                    self.phase = DraftPhase.BAN_WAITING
+                    if has_ban_kw and not self.remembered_opp_ban:
+                        self.in_ban_waiting = True
+                        self.phase = DraftPhase.BAN_WAITING
 
-            # 3. Ban phase header detected
+            # 4. Ban phase header detected
             elif has_ban_kw:
                 self.last_wakeup_time = now_ts
                 if not self.remembered_opp_ban:
@@ -148,18 +184,6 @@ class DraftStateMachine:
                     if not self.logged_ban_enter:
                         self.logged_ban_enter = True
                         logger.info(f"⏳ 已進入禁選階段，等待對手鎖定 Ban 位 (OCR='{full_text_opp[:40]}')")
-
-            # 4. Settlement screen (victory / defeat / early surrender)
-            elif any(kw in full_text_opp for kw in SETTLE_KEYWORDS):
-                had_state = bool(
-                    self.remembered_opp_ban
-                    or self.opp_draft
-                    or self.my_draft
-                    or self.has_triggered_five_picks
-                )
-                self.reset(DraftPhase.SLEEP)
-                if had_state:
-                    should_reset_battle = True
 
             # Idle / stale partial-draft sleep protection
             if self.is_active_phase:
@@ -175,11 +199,23 @@ class DraftStateMachine:
             if "不能上" in full_text_opp:
                 return self._make_snapshot(False, should_reset_battle), True
 
-            # New Ban phase starting right after an earlier match without lobby screen
-            if has_ban_kw and (self.opp_draft or self.my_draft or self.has_triggered_five_picks):
-                self.reset(DraftPhase.BAN_WAITING)
-                self.last_wakeup_time = now_ts
-                should_reset_battle = True
+            # New Ban phase starting right after an earlier match without lobby screen:
+            # Require explicit multi-char Ban header (NOT bare '禁' from '禁療') and post-5-pick guard!
+            if has_explicit_ban_reset and (
+                self.opp_draft or self.my_draft or self.has_triggered_five_picks
+            ):
+                allow_ban_reset = True
+                if self.has_triggered_five_picks and self.five_picks_locked_time > 0.0:
+                    allow_ban_reset = (
+                        now_ts - self.five_picks_locked_time
+                    ) >= self.POST_FIVE_PICK_BAN_GUARD_SEC
+                if allow_ban_reset:
+                    logger.info(
+                        f"🔄 [DraftFSM] 偵測到新對局禁選階段，重置上一場陣容 (OCR='{full_text_opp[:36]}')"
+                    )
+                    self.reset(DraftPhase.BAN_WAITING)
+                    self.last_wakeup_time = now_ts
+                    should_reset_battle = True
 
             # Parse opponent Ban & 1..5 picks under the strict Ban Hard Gate
             for text in opp_texts:
@@ -231,6 +267,7 @@ class DraftStateMachine:
             self.phase = DraftPhase.IN_BATTLE
             if not self.has_triggered_five_picks:
                 self.has_triggered_five_picks = True
+                self.five_picks_locked_time = now_ts
                 just_completed_five = True
 
         return self._make_snapshot(just_completed_five, should_reset_battle), False

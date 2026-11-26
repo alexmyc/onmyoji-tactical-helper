@@ -97,25 +97,19 @@ class AITacticalManager:
         """Immediately wakes `_battle_loop` from poll sleep for zero-lag mode switches."""
         self._wake_event.set()
 
-    def show_windows_immediately(self, root_window: tk.Tk, show_overlay: bool = True) -> None:
-        """Creates `AITacticalUI` and `BattleOverlayUI` immediately on mode toggle."""
-        self.root_window = root_window
-        self.presenter.ensure_windows(
-            root_window=root_window,
-            show_overlay=show_overlay,
-            on_closed_by_user=self.on_ui_closed_by_user,
-            is_cancelled_fn=lambda: self.user_closed,
-        )
+    def hide_battle_windows(self) -> None:
+        """Hides and destroys floating tactical/HUD windows when outside an active 5v5 battle."""
+        self.presenter.destroy_all(self.root_window)
 
     def update_live_draft(self, my_draft: list[str], opp_draft: list[str]) -> None:
-        """Hot-updates 5v5 draft names in-place if the session was started before 5 picks locked."""
+        """Updates 5v5 draft names in-place under `_state_lock`."""
         with self._state_lock:
             self.my_draft_live = list(my_draft)
             self.opp_draft_live = list(opp_draft)
             self.my_slot_map = {f"Slot {i + 1}": name for i, name in enumerate(my_draft)}
         self.wake_loop()
 
-    def enable_mode(self, mode_name: str) -> None:
+    def enable_mode(self, mode_name: str, has_locked_draft: bool = True) -> None:
         """Configures HUD overlay and Red Mode auto-executor flags on mode switch."""
         target = mode_name.value if isinstance(mode_name, OperatingMode) else str(mode_name)
         with self.session_lock, self._state_lock:
@@ -125,24 +119,31 @@ class AITacticalManager:
             self.auto_battle_enabled = target == OperatingMode.RED.value
             self.latest_auto_action_text = ""
             self._decision_ready_ts = 0.0
+            active_combat = self.is_active_session and self.battle_has_started
+
+        if target in (OperatingMode.YELLOW.value, OperatingMode.RED.value):
+            self.models.warmup_in_background()
 
         if target == OperatingMode.RED.value:
             self.auto_executor.reset_for_match()
-            self.auto_executor.start_kill_switch_monitor(on_emergency_stop=self._handle_emergency_stop)
-            try:
-                wins = CaptureEngine().find_windows()
-                if wins:
-                    game_hwnd = int(wins[0]._hWnd)
-                    if self.auto_executor.check_uipi_privilege_block(game_hwnd):
-                        uipi_warn = "⚠️ 遊戲以管理員運行，請以系統管理員身分啟動助手"
-                        with self._state_lock:
-                            self.latest_auto_action_text = uipi_warn
-                        if self.mode_controller and hasattr(self.mode_controller, "update_status_text"):
-                            self.mode_controller.update_status_text(uipi_warn)
-                    else:
-                        self.auto_executor.is_game_window_foreground(game_hwnd, allow_reclaim_from_self=True)
-            except Exception as exc:
-                logger.debug(f"[BattleCoordinator] Initial Red Mode window check skipped: {exc}")
+            if has_locked_draft or active_combat:
+                self.auto_executor.start_kill_switch_monitor(on_emergency_stop=self._handle_emergency_stop)
+                try:
+                    wins = CaptureEngine().find_windows()
+                    if wins:
+                        game_hwnd = int(wins[0]._hWnd)
+                        if self.auto_executor.check_uipi_privilege_block(game_hwnd):
+                            uipi_warn = "⚠️ 遊戲以管理員運行，請以系統管理員身分啟動助手"
+                            with self._state_lock:
+                                self.latest_auto_action_text = uipi_warn
+                            if self.mode_controller and hasattr(self.mode_controller, "update_status_text"):
+                                self.mode_controller.update_status_text(uipi_warn)
+                        else:
+                            self.auto_executor.is_game_window_foreground(
+                                game_hwnd, allow_reclaim_from_self=True
+                            )
+                except Exception as exc:
+                    logger.debug(f"[BattleCoordinator] Initial Red Mode window check skipped: {exc}")
         else:
             self.auto_executor.stop_immediately()
 
@@ -208,7 +209,7 @@ class AITacticalManager:
             self.close_ui()
 
     def reset_to_blank(self, root_window: tk.Tk | None) -> None:
-        """Resets battle session state and clears HUD/advice panels on match completion."""
+        """Resets battle session state and immediately hides/closes HUD & advice panels on match end."""
         self.stop_requested = True
         self.battle_has_started = False
         self.no_box_start_time = 0.0
@@ -231,13 +232,14 @@ class AITacticalManager:
             self.turn_detector.reset_cache()
 
         self.is_active_session = False
-        self.presenter.reset_blank(root_window)
+        self.presenter.destroy_all(root_window or self.root_window)
         self.models.purge_cuda_cache()
 
     def reset_for_next_match(self) -> None:
-        """Prepares coordinator for a fresh match session."""
+        """Hides floating windows and prepares coordinator cleanly for a fresh match session."""
         with self.session_lock, self._state_lock:
             self.stop_requested = True
+            self.is_active_session = False
             self.battle_has_started = False
             self.consecutive_alive_frames = 0
             self.no_box_start_time = 0.0
@@ -249,11 +251,17 @@ class AITacticalManager:
             self._llm_override_slot = None
             self.user_closed = False
         self.auto_executor.stop_immediately()
+        self.presenter.destroy_all(self.root_window)
         self.wake_loop()
 
         if self.battle_thread and self.battle_thread.is_alive():
             if self.battle_thread != threading.current_thread():
                 self.battle_thread.join(timeout=1.0)
+
+        with self.models.yolo_lock:
+            self.action_bar_detector.reset()
+            self.parser.reset_baseline()
+            self.turn_detector.reset_cache()
 
     def _async_llm_reasoning(self, payload: dict[str, Any], turn_key: tuple[bool, str | None]) -> None:
         """Runs Gemma-4 / rule reasoning asynchronously and marks post-decision buffer ready."""
@@ -342,14 +350,8 @@ class AITacticalManager:
             self._llm_override_slot = None
 
         try:
-            # Show HUD Overlay & AI Panel BEFORE model check so UI appears immediately!
-            self.presenter.ensure_windows(
-                root_window=root_window,
-                show_overlay=self.show_overlay,
-                on_closed_by_user=self.on_ui_closed_by_user,
-                is_cancelled_fn=lambda: self.user_closed or self.stop_requested,
-            )
-
+            # Strict Battle Lifecycle Gate: keep AITacticalUI & BattleOverlayUI HIDDEN until
+            # 5v5 arena combat entry is confirmed below (`battle_has_started == True`)!
             self.model_ready_event.clear()
             if not self.models.ensure_loaded(should_abort_fn=lambda: self.stop_requested or self.user_closed):
                 self.is_active_session = False
@@ -359,6 +361,8 @@ class AITacticalManager:
                 self.context_builder = BattleContextBuilder(repo=self.repository)
 
             self.model_ready_event.set()
+            windows_ensured = False
+            logged_battle_entry = False
 
             while not self._is_cancelled():
                 hwnd = self._resolve_battle_hwnd(clicker, preferred_hwnd)
@@ -396,6 +400,83 @@ class AITacticalManager:
                 if not self.battle_has_started and len(self.action_bar_detector.prep_templates) < 5:
                     self.action_bar_detector.capture_prep_templates(screen_color, our_picks=cur_my_draft)
 
+                results = self.models.predict_yolo(screen_color)
+                if results is None or self._is_cancelled():
+                    break
+
+                boxes_data = []
+                for box in results[0].boxes:
+                    cls_id = int(box.cls[0])
+                    xyxy = box.xyxy[0].cpu().numpy()
+                    boxes_data.append(
+                        {
+                            "cls": cls_id,
+                            "cx": float((xyxy[0] + xyxy[2]) / 2.0),
+                            "cy": float((xyxy[1] + xyxy[3]) / 2.0),
+                        }
+                    )
+
+                current_time = time.time()
+
+                # Pre-battle gate: never run StateParser or pop HUD/AI windows on Ban/Pick or VS banners!
+                if not self.battle_has_started:
+                    arena_opp = sum(
+                        1
+                        for b in boxes_data
+                        if b["cls"] == 0
+                        and (screen_w * 0.25) <= b["cx"] <= (screen_w * 0.93)
+                        and (screen_h * 0.06) <= b["cy"] <= (screen_h * 0.62)
+                    )
+                    arena_my = sum(
+                        1
+                        for b in boxes_data
+                        if b["cls"] == 1
+                        and b["cx"] < (screen_w * 0.87)
+                        and b["cy"] > (screen_h * 0.40)
+                    )
+                    both_sides_present = (
+                        arena_opp >= 2 and arena_my >= 2 and (arena_opp + arena_my) >= 5
+                    )
+                    if both_sides_present or (is_my_turn and (arena_opp + arena_my) >= 3):
+                        self.consecutive_alive_frames += 1
+                    else:
+                        self.consecutive_alive_frames = 0
+
+                    if self.consecutive_alive_frames >= 2 or (
+                        is_my_turn and (arena_opp + arena_my) >= 3
+                    ):
+                        self.battle_has_started = True
+                        self.no_box_start_time = 0.0
+                        self.parser.reset_baseline()
+                        if self.auto_battle_enabled:
+                            self.auto_executor.reset_for_match()
+                            self.auto_executor.start_kill_switch_monitor(
+                                on_emergency_stop=self._handle_emergency_stop
+                            )
+                            self.auto_executor.is_game_window_foreground(
+                                hwnd, allow_reclaim_from_self=True
+                            )
+                    else:
+                        if (current_time - self.session_start_time) >= 90.0:
+                            logger.info("⏳ [BattleLoop] 等待進入實戰逾時 (90s)，結束本次待機。")
+                            self.reset_to_blank(root_window)
+                            break
+                        self._wake_event.wait(timeout=0.25)
+                        self._wake_event.clear()
+                        continue
+
+                # Ensure floating windows exist once 5v5 battle is confirmed (and on Yellow<->Red toggles)
+                if not windows_ensured or (
+                    self.show_overlay and self.presenter.overlay_ui is None
+                ):
+                    self.presenter.ensure_windows(
+                        root_window=root_window,
+                        show_overlay=self.show_overlay,
+                        on_closed_by_user=self.on_ui_closed_by_user,
+                        is_cancelled_fn=self._is_cancelled,
+                    )
+                    windows_ensured = True
+
                 active_slot: str | None = None
                 active_shiki: str = UNKNOWN_SHIKIGAMI
                 if is_my_turn:
@@ -405,7 +486,6 @@ class AITacticalManager:
                         with self._state_lock:
                             active_shiki = self.my_slot_map.get(active_slot, UNKNOWN_SHIKIGAMI)
 
-                current_time = time.time()
                 current_turn_key = (is_my_turn, active_slot)
                 with self._state_lock:
                     if current_turn_key != self.last_turn_key:
@@ -423,25 +503,6 @@ class AITacticalManager:
                             self._decision_ready_ts = 0.0
                             self.latest_auto_action_text = ""
 
-                if self._is_cancelled():
-                    break
-
-                results = self.models.predict_yolo(screen_color)
-                if results is None or self._is_cancelled():
-                    break
-
-                boxes_data = []
-                for box in results[0].boxes:
-                    cls_id = int(box.cls[0])
-                    xyxy = box.xyxy[0].cpu().numpy()
-                    boxes_data.append(
-                        {
-                            "cls": cls_id,
-                            "cx": float((xyxy[0] + xyxy[2]) / 2.0),
-                            "cy": float((xyxy[1] + xyxy[3]) / 2.0),
-                        }
-                    )
-
                 my_status, opp_status = self.parser.parse_frame(
                     cur_my_draft, cur_opp_draft, boxes_data, screen_w, screen_height=screen_h
                 )
@@ -450,6 +511,14 @@ class AITacticalManager:
                 opp_alive_count = sum(1 for info in opp_status.values() if info.get("alive", False))
                 total_alive = my_alive_count + opp_alive_count
                 current_time = time.time()
+
+                if not logged_battle_entry:
+                    logged_battle_entry = True
+                    logger.info(
+                        f"⚔️ [BattleLoop] 已進入實戰追蹤 | hwnd={hwnd} | 畫面={screen_w}x{screen_h} "
+                        f"| 我方存活={my_alive_count} 敵方存活={opp_alive_count} "
+                        f"| overlay={self.show_overlay} auto_red={self.auto_battle_enabled}"
+                    )
 
                 with self._state_lock:
                     locked_llm_slot = self._llm_override_slot
@@ -473,7 +542,6 @@ class AITacticalManager:
                 self.auto_executor.observe_turn_state(is_my_turn)
                 skill_mapping_snapshot = dict(self.turn_detector.get_skill_mapping(screen_color))
 
-                # Render HUD Overlay immediately on Frame 1 (never wait for LLM reasoning!)
                 if self.show_overlay:
                     self.presenter.schedule_overlay_frame(
                         root_window=root_window,
@@ -493,25 +561,14 @@ class AITacticalManager:
                         is_cancelled_fn=self._is_cancelled,
                     )
 
-                if total_alive >= 4 or is_my_turn:
-                    self.consecutive_alive_frames += 1
-                    if not self.battle_has_started:
-                        self.battle_has_started = True
-                        logger.info(
-                            f"⚔️ [BattleLoop] 已進入實戰追蹤 | hwnd={hwnd} | 畫面={screen_w}x{screen_h} "
-                            f"| 我方存活={my_alive_count} 敵方存活={opp_alive_count} "
-                            f"| overlay={self.show_overlay} auto_red={self.auto_battle_enabled}"
-                        )
+                # Only end active battle when ALL units and skill bar are gone (preserves 1v1/2v1 endgames!)
+                if total_alive >= 1 or is_my_turn:
                     self.no_box_start_time = 0.0
                 else:
-                    self.consecutive_alive_frames = 0
-                    if self.battle_has_started:
-                        if self.no_box_start_time == 0.0:
-                            self.no_box_start_time = current_time
-                        if (current_time - self.no_box_start_time) >= 8.0:
-                            self.reset_to_blank(root_window)
-                            break
-                    elif (current_time - self.session_start_time) >= 60.0:
+                    if self.no_box_start_time == 0.0:
+                        self.no_box_start_time = current_time
+                    elif (current_time - self.no_box_start_time) >= 6.0:
+                        logger.info("🏁 [BattleLoop] 實戰畫面已結束，自動隱藏戰術面板與 HUD。")
                         self.reset_to_blank(root_window)
                         break
 
