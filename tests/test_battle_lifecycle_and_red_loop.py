@@ -529,3 +529,91 @@ def test_enemy_first_provisional_entry_forces_hard_recalibration_on_first_my_tur
     assert mgr.parser.is_opp_baseline_set is False
 
     mgr.reset_for_next_match()
+
+
+def test_red_mode_max_turn_retries_circuit_breaker_downgrades_to_yellow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verifies `MAX_TURN_RETRIES = 5`: if the client freezes on `is_my_turn=True` across 1 initial cast
+    + 5 retries (6 total dispatches), Red Mode halts clicking and downgrades cleanly to Yellow Mode.
+    """
+    _, dict_map, multi_shorts, tags_db = get_public_demo_bundle()
+    repo = ShikigamiRepository(tags_db=tags_db, full_to_short_map=dict_map, multi_char_shorts=multi_shorts)
+    mgr = AITacticalManager(repository=repo)
+    assert mgr.MAX_TURN_RETRIES == 5
+
+    mgr.POLL_MY_TURN = 0.01
+    mgr.POLL_OPP_TURN = 0.01
+    mgr.POST_DECISION_BUFFER_RANGE = (0.01, 0.015)
+
+    clicks: list[tuple[str, int, int]] = []
+    mgr.auto_executor = AutoBattleExecutor(
+        min_turn_cooldown=0.02,
+        retry_cooldown_range=(0.02, 0.025),
+        reaction_delay_range=(0.0, 0.002),
+        inter_click_delay_range=(0.0, 0.002),
+        target_jitter_px=0.0,
+        skill_jitter_px=0.0,
+        input_backend=lambda act, x, y: (clicks.append((act, x, y)) or True),
+        foreground_checker=lambda _h: True,
+        client_to_screen_fn=lambda _h, ix, iy, iw, ih: (ix, iy, (0, 0, iw, ih)),
+        key_checker=lambda _vk: False,
+        uipi_checker=lambda _h: False,
+    )
+
+    monkeypatch.setattr(mgr.models, "warmup_in_background", lambda: None)
+    monkeypatch.setattr(mgr.models, "ensure_loaded", lambda should_abort_fn=None: True)
+    monkeypatch.setattr(mgr.models, "has_active_gpu_llm", lambda: False)
+    monkeypatch.setattr(coord_mod.ctypes.windll.user32, "IsIconic", lambda _h: 0)
+    monkeypatch.setattr(mgr, "_resolve_battle_hwnd", staticmethod(lambda _c, _p: 6666))
+    mgr.turn_detector.ACTIVATION_THRESHOLD = 0.005
+
+    w, h = 1182, 666
+    draft_frame, frozen_turn_frame = _build_draft_and_combat_frames(
+        mgr.turn_detector, mgr.action_bar_detector, w, h
+    )
+
+    class _CaptureStub:
+        def find_windows(self) -> list[Any]:
+            return []
+
+        def capture_frame(self, hwnd: int, need_gray: bool = False, window_title: str = "") -> CaptureFrame:
+            return CaptureFrame(
+                bgr=frozen_turn_frame,
+                gray=None,
+                hwnd=hwnd,
+                window_title=window_title,
+                crop=CropOffset(x0=0, y0=0, client_w=w, client_h=h),
+            )
+
+    monkeypatch.setattr(coord_mod, "CaptureEngine", _CaptureStub)
+    monkeypatch.setattr(
+        mgr.models,
+        "predict_yolo",
+        lambda _img: [_FakeYoloResult([_FakeBox(0, w * 0.55, h * 0.30), _FakeBox(1, w * 0.315, h * 0.63)])],
+    )
+    monkeypatch.setattr(mgr.presenter, "ensure_windows", lambda **_kw: None)
+
+    my_picks = ["葛", "帝", "骷", "閻", "連"]
+    opp_picks = ["玲", "SP桃", "葛", "酒吞", "季"]
+    mgr.capture_draft_templates(draft_frame, my_picks)
+
+    ctrl = ModeController(mgr)
+    ui_stub = _MainUIStub()
+    ctrl.set_ui_app(ui_stub)
+    ctrl.save_and_handle_five_picks(ui_stub.root, my_picks, opp_picks, draft_frame, 6666)  # type: ignore[arg-type]
+    ctrl.set_mode("red")
+    while ctrl.is_busy:
+        time.sleep(0.01)
+
+    deadline = time.time() + 2.5
+    while ctrl.current_mode == "red" and time.time() < deadline:
+        time.sleep(0.015)
+
+    # 1 initial cast + 5 retries = 6 dispatches * 2 clicks ([skill, target]) = 12 clicks max, then auto-downgrade!
+    assert ctrl.current_mode == "yellow"
+    assert mgr.auto_battle_enabled is False
+    assert len(clicks) == (1 + mgr.MAX_TURN_RETRIES) * 2
+    assert "重試達上限" in ui_stub.lbl_status.text
+
+    mgr.reset_for_next_match()

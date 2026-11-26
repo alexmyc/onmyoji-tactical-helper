@@ -21,12 +21,12 @@
 | :--- | :--- |
 | **Architecture** | Unidirectional **7-layer modular Python 3.12 package** (`33` modules, Cython 3.3 `.pyd` native compilation) |
 | **5v5 Vision & Tracking** | Custom `YOLOv8n` (**`99.5%` peak `mAP@50`**) + 2D partial-affine tracking + **Actionable Turn-UI baseline calibration** |
-| **End-to-End Latency** | **`2.865 ms` P50** (`3.829 ms` P99) single-frame `1280×720` CV + Rule + HUD + `125%` DWM DPI pipeline |
-| **Verification & QA** | **38 offline unit, E2E & noisy synthetic CV tests** (**`82.0%` core coverage**, `Ruff` + `Mypy` checked in CI) |
+| **End-to-End Latency** | **`3.193 ms` P50** (`6.700 ms` P99) single-frame `1280×720` CV + Rule + HUD + `125%` DWM DPI pipeline |
+| **Verification & Governance** | **39 offline unit, E2E & noisy synthetic CV tests** (**`82.0%` core coverage**, `ISO/IEC 25010 · 27001 · 29119` aligned) |
 
-> **30-Second Offline Interactive Demo — No Game Client, GPU, Model Weights, or `.env` Required:**
-> ```powershell
-> pip install numpy opencv-python pygetwindow pywin32
+> **30-Second Cross-Platform Offline Interactive Demo (Windows & Linux) — No Game, GPU, Weights, or `.env` Required:**
+> ```bash
+> pip install numpy opencv-python
 > python run_app.py --demo
 > ```
 > Launches **three synchronized GUI windows** (*Interactive Match Sandbox*, *Live Draft & Mode View*, and *AI Tactical Advisor*) powered by the real production engines and built-in bilingual dataset (`27` aliases, `13` unit profiles, `2` playbooks). Step through Ban/Pick counter-chains, dead-branch pivots, mirror-match alerts, or click **Green / Yellow / Red** modes directly to inspect live engine telemetry.
@@ -58,7 +58,7 @@
 
 - **Mixed-DPI Coordinate Projection & Human-in-the-Loop Override Controls**
   - Shares a single physical coordinate projection (`project_cropped_to_physical_client`) across the click-through HUD (`WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE`) and UI dispatch layer—maintaining 1:1 pixel alignment across `100% / 125% / 150% / 200%` DWM DPI scaling, `16:10` letterboxes, and negative-coordinate multi-monitor desktops.
-  - Implements **deterministic fail-safe guardrails**: smoothstep cursor interpolation with UI hover stabilization (`35–50 ms` `MOUSEEVENTF_MOVE` hover pulse + pre-click cursor re-anchoring), skill-first 2-step dispatch (`[skill button] -> 0.20–0.28s -> [target unit]`) with a `1.0–1.5s` post-decision settle buffer and `1.2–1.8s` unfinished-turn retry loop, automatic `S1` fallback on orb shortage, UIPI privilege-mismatch inspection, and **`< 50 ms` `F12` / `ESC` human-in-the-loop emergency downgrade controls**.
+  - Implements **deterministic fail-safe guardrails**: smoothstep cursor interpolation with UI hover stabilization (`35–50 ms` `MOUSEEVENTF_MOVE` hover pulse + pre-click cursor re-anchoring), skill-first 2-step dispatch (`[skill button] -> 0.20–0.28s -> [target unit]`) with a `1.0–1.5s` post-decision settle buffer, `1.2–1.8s` unfinished-turn retry loop capped by a **`MAX_TURN_RETRIES = 5` circuit breaker** (auto-downgrading to Yellow Mode if the client freezes), automatic `S1` fallback on orb shortage, UIPI privilege-mismatch inspection, and **`< 50 ms` `F12` / `ESC` human-in-the-loop emergency downgrade controls**.
 
 - **Dual-Track Data Isolation & Credential-Free Default Packaging**
   - **Public Sandbox vs. Private Cloud Sync**: Public Sandbox Mode (`--demo` or default when `.env` is absent) bundles **27 curated sample aliases, 13 shikigami combat profiles, and 2 sample playbooks** (`public_demo_data.py`) for instant zero-config evaluation; configuring an untracked local `.env` dynamically syncs the full **1,128-entry alias dictionary and 251 shikigami tag profiles** from external Google Sheets.
@@ -101,8 +101,8 @@ flowchart TB
 
     subgraph AutoUI["automation/ & ui/ — Non-Intrusive HUD & Override Guardrails"]
         Mapper["CoordinateMapper\n(DWM DPI + Letterbox Physical Projection)"]
-        Safety["SafetyGuard\n(50 ms F12/ESC Poll + 2.2s Turn Latch)"]
-        Exec["AutoBattleExecutor\n(Smooth Interpolation + >95 px Takeover Check)"]
+        Safety["SafetyGuard\n(50 ms F12/ESC Poll + 1.2-1.8s Retry Gate)"]
+        Exec["AutoBattleExecutor\n(Skill-First Dispatch + F12 / ESC (<50ms) Emergency Stop)"]
         HUD["OnmyojiHelperUI · AITacticalUI · BattleOverlayUI · DemoSandbox"]
     end
 
@@ -148,13 +148,13 @@ Measured offline on Python `3.12.1` (`Windows x64`) via [scripts/run_benchmarks.
 
 | Pipeline Stage (`scripts/run_benchmarks.py`) | P50 (ms) | P95 (ms) | P99 (ms) | Mean (ms) |
 | :--- | :---: | :---: | :---: | :---: |
-| **`xmind_counter_tree_scoring`** (viability decay + mirror check) | **`0.073`** | **`0.077`** | **`0.080`** | `0.073` |
-| **`shikigami_repo_lru_lookup`** (`@lru_cache` tag query) | **`< 0.001`** | **`< 0.001`** | **`0.001`** | `< 0.001` |
-| **`noisy_2d_affine_spatial_tracker`** (`±4 px` noise + affine + EMA) | **`0.282`** | **`0.313`** | **`0.336`** | `0.286` |
-| **`mixed_dpi_coordinate_projection`** (`125% DPI` + `16:10` letterbox) | **`0.003`** | **`0.003`** | **`0.004`** | `0.003` |
-| **`draft_roi_motion_diff_gate`** (`120×80` `INTER_AREA` Gaussian absdiff gate) | **`0.477`** | **`0.539`** | **`0.613`** | `0.485` |
-| **`turn_detector_sobel_hsv_full_pass`** (`1280×720` Hough + Sobel + HSV) | **`2.452`** | **`2.893`** | **`3.035`** | `2.502` |
-| **`e2e_synthetic_frame_to_hud`** (`1280×720` Frame -> CV + Rule + HUD + `125%` DPI) | **`2.865`** | **`3.606`** | **`3.829`** | `2.978` |
+| **`xmind_counter_tree_scoring`** (viability decay + mirror check) | **`0.078`** | **`0.105`** | **`0.142`** | `0.082` |
+| **`shikigami_repo_lru_lookup`** (`@lru_cache` tag query) | **`0.001`** | **`0.001`** | **`0.001`** | `0.001` |
+| **`noisy_2d_affine_spatial_tracker`** (`±4 px` noise + affine + EMA) | **`0.310`** | **`0.420`** | **`0.711`** | `0.336` |
+| **`mixed_dpi_coordinate_projection`** (`125% DPI` + `16:10` letterbox) | **`0.003`** | **`0.005`** | **`0.006`** | `0.004` |
+| **`draft_roi_motion_diff_gate`** (`120×80` `INTER_AREA` Gaussian absdiff gate) | **`0.504`** | **`0.579`** | **`1.574`** | `0.537` |
+| **`turn_detector_sobel_hsv_full_pass`** (`1280×720` Hough + Sobel + HSV) | **`2.563`** | **`4.790`** | **`6.021`** | `2.844` |
+| **`e2e_synthetic_frame_to_hud`** (`1280×720` Frame -> CV + Rule + HUD + `125%` DPI) | **`3.193`** | **`5.526`** | **`6.700`** | `3.464` |
 
 *Live runtime reference (RTX 3080 Laptop GPU, `1920×1200 @ 125% DPI`): GDI `BitBlt` + border crop `~1.8 ms`, `YOLOv8n` forward pass `~8 ms` (CUDA `640px`) / `~28 ms` (CPU `480px`), `SafetyGuard` hotkey poll `50 ms`, idle background CPU `< 1.5%`.*
 
@@ -166,19 +166,33 @@ Click the status indicator dot in the top-left corner of the main window to cycl
 
 - 🟢 **Green Mode (Draft Decision Support)** — Runs Ban/Pick OCR, XMind counter recommendations, and opponent predictions with **0 MB GPU VRAM** footprint.
 - 🟡 **Yellow Mode (Passive Visual HUD + Tactical Advisor — Primary Showcase)** — Loads `YOLOv8n` and Gemma-4 (or 0-VRAM rules) on 5v5 battle entry, rendering click-through (`WS_EX_TRANSPARENT | WS_EX_NOACTIVATE`) target lock rings, skill availability boxes, and live tactical advice with **zero input injection**.
-- 🔴 **Red Mode (Closed-Loop UI Automation Research)** — Studies closed-loop coordinate projection and skill-first 2-step UI dispatch (`[skill button] -> 0.20–0.28s -> [target unit]`) with `1.0–1.5s` camera-settle buffering, `1.2–1.8s` unfinished-turn retries, and `S1` orb-shortage fallback. Pressing **`F12`** or **`ESC`** yields control back to passive Yellow Mode in `< 50 ms`.
+- 🔴 **Red Mode (Closed-Loop UI Automation Research)** — Studies closed-loop coordinate projection and skill-first 2-step UI dispatch (`[skill button] -> 0.20–0.28s -> [target unit]`) with `1.0–1.5s` camera-settle buffering, `1.2–1.8s` unfinished-turn retries (`MAX_TURN_RETRIES = 5` circuit-breaker downgrade), and `S1` orb-shortage fallback. Pressing **`F12`** or **`ESC`** yields control back to passive Yellow Mode in `< 50 ms`.
+
+---
+
+## Engineering Standards & Quality Assurance
+
+This repository aligns its design, credential boundaries, and automated verification pipeline with international software engineering standards:
+
+- **ISO/IEC 25010 (Software Product Quality)**:
+  - *Functional Suitability*: Strict unidirectional **7-layer dependency graph** decoupling pure domain models, symbolic counter-trees, and finite-state machines from Win32 GDI/SendInput and Tkinter GUI layers.
+  - *Performance Efficiency*: Deterministic sub-`4 ms` E2E perception-to-HUD latency (`P50 = 3.193 ms`), `120×80` `INTER_AREA` motion-diff OCR gating, `BELOW_NORMAL_PRIORITY_CLASS`, and `1–2` thread OpenMP/BLAS caps.
+  - *Reliability*: Actionable `is_my_turn` skill-bar baseline calibration, `< 50 ms` `F12`/`ESC` hardware-polled emergency brake, `MAX_TURN_RETRIES = 5` per-turn circuit breaker, `S1` orb-shortage downgrade, and zero-VRAM deterministic rule fallback.
+  - *Maintainability & Portability*: `Ruff` + `Mypy` static verification across all 41 source files, zero import-time side effects, and cross-platform Windows/Linux `--demo` interactive sandbox.
+- **ISO/IEC 27001 & OWASP (Credential & Privilege Governance)**: Documented in [SECURITY.md](SECURITY.md) — enforces untracked `.env` secret isolation, credential-free default `.exe` packaging (`build_release.py`), conditional least-privilege Windows UAC elevation, and `%LOCALAPPDATA%` vectorized XOR cache obfuscation.
+- **ISO/IEC/IEEE 29119 (Multi-Tier Test Governance)**: Documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#7-engineering-standards-alignment--multi-tier-test-governance) — spans deterministic symbolic unit tests, noisy synthetic CV regression (`±4 px` jitter + `3.0s` occlusion + flashbang rejection), lifecycle/circuit-breaker integration, cross-platform `--demo` GUI smoke tests, and dependency-free headless CI gates.
 
 ---
 
 ## Quick Start
 
-### 1. Instant Offline Interactive Demo (Recommended for Reviewers)
+### 1. Instant Offline Interactive Demo (Recommended for Reviewers — Windows & Linux)
 No game installation, external model weights, UAC elevation, or `.env` configuration required:
-```powershell
-# Minimal 3-second install for the offline interactive sandbox:
-pip install numpy opencv-python pygetwindow pywin32
+```bash
+# Minimal cross-platform install for the offline interactive sandbox:
+pip install numpy opencv-python
 
-# Or install the full CV + ONNX OCR runtime:
+# Or install the full Windows CV + ONNX OCR runtime:
 pip install -r requirements.txt
 
 python run_app.py --demo
@@ -186,7 +200,7 @@ python run_app.py --demo
 Opens the **Draft & Mode Window**, **AI Tactical Panel**, and **Interactive Match Sandbox** side-by-side using the built-in bilingual Public Sandbox dataset (`27` sample aliases, `13` combat profiles, `2` playbooks). Step through all 4 engineering scenarios, switch playbooks, or click **Green / Yellow / Red** modes on either window to inspect real-time engine decisions.
 
 ### 2. Run QA Gate (Tests, Coverage Transparency, Mypy, Ruff & Benchmarks)
-Install QA/development tools from `requirements-dev.txt` and run all **38** offline tests:
+Install QA/development tools from `requirements-dev.txt` and run all **39** offline tests:
 ```powershell
 pip install -r requirements-dev.txt
 pytest -v --cov=onmyoji_helper --cov-report=term-missing --cov-fail-under=70
@@ -194,7 +208,7 @@ mypy src
 ruff check src tests scripts run_app.py build_release.py
 python scripts/run_benchmarks.py
 ```
-- **Coverage Scope Transparency**: Headless CI enforces **`>= 70%`** coverage across the decoupled core decision, vision, domain, automation, and sync-parser layers (currently **`82.0%`** across `2,233` statements). Full-repository line coverage—when counting interactive Tkinter GUI windows, Win32 GDI/SendInput syscalls, and CUDA/GGUF model loaders (`4,810` total statements)—stands at **`59.4%`**.
+- **Coverage Scope Transparency**: Headless CI enforces **`>= 70%`** coverage across the decoupled core decision, vision, domain, automation, and sync-parser layers (currently **`82.0%`** across `2,233` statements). Full-repository line coverage—when counting interactive Tkinter GUI windows, Win32 GDI/SendInput syscalls, and CUDA/GGUF model loaders (`4,818` total statements)—stands at **`59.5%`**.
 
 ### 3. Live HUD Execution & Optional Private Cloud Sync (`.env`)
 - **Public Sandbox Mode (Default)**: Launching `python run_app.py` without `.env` loads the built-in sample dataset (`public_demo_data.py`: `27` aliases, `13` tags, `2` playbooks).
@@ -221,6 +235,7 @@ Generates `dist\OnmyojiHelper\` containing **`OnmyojiHelper.exe`** and **`data\`
 ```text
 onmyoji-tactical-helper/
 ├── README.md                          # System overview, live previews, YOLOv8n curves & benchmarks
+├── SECURITY.md                        # ISO/IEC 27001 & OWASP credential isolation & disclosure policy
 ├── .env.example                       # Optional private cloud sync & license config template
 ├── requirements.txt                   # Pure runtime dependencies
 ├── requirements-dev.txt               # QA, test coverage, typing & native packaging tools
@@ -243,7 +258,7 @@ onmyoji-tactical-helper/
 │       ├── infra/                     # EnvLoader, Win32 APIs, BitBlt, XOR cache sync & VRAM guard
 │       ├── ui/                        # MainWindow, AITacticalUI, BattleOverlayUI & DemoSandbox
 │       └── app/                       # Runtime bootstrap, ModeController & BattleCoordinator
-├── tests/                             # Offline unit, E2E & noisy synthetic CV suite (38 tests)
+├── tests/                             # Offline unit, E2E & noisy synthetic CV suite (39 tests)
 └── .github/workflows/ci.yml           # GitHub Actions CI (Ruff + Mypy + Pytest >=70% Core Coverage)
 ```
 

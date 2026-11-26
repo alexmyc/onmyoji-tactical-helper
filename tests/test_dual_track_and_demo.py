@@ -1,6 +1,5 @@
 """Unit Tests for Dual-Track `.env` Isolation, Public Sandbox Mode, and `--demo` Scenarios."""
 
-import os
 import subprocess
 import sys
 import tomllib
@@ -145,26 +144,41 @@ def test_demo_sandbox_controller_all_four_scenarios() -> None:
     assert format_bilingual_token("閻") == "閻 (SP Enma)"
 
 
-def test_version_consistency_and_headless_clean_demo_smoke() -> None:
-    """Ensures package `__version__` matches `pyproject.toml` (`1.0.0`) and `--demo` runs credential-free."""
+def test_version_consistency_and_cross_platform_demo_smoke() -> None:
+    """Ensures `__version__ == '1.0.0'` and `--demo` runs without Win32, GPU, OCR, or `.env` packages."""
     root_dir = Path(__file__).resolve().parent.parent
     pyproject_data = tomllib.loads((root_dir / "pyproject.toml").read_text(encoding="utf-8"))
     assert onmyoji_helper.__version__ == "1.0.0"
     assert pyproject_data["project"]["version"] == onmyoji_helper.__version__
 
-    env = dict(os.environ)
-    env["ONMYOJI_DISABLE_DOTENV"] = "1"
-    env["ONMYOJI_SKIP_UAC_FOR_TEST"] = "1"
+    # Simulate a clean Linux / cross-platform machine (blocking pywin32, pygetwindow, YOLO, Torch, OCR, LLM)
+    cross_platform_smoke = """
+import builtins, os, sys
+import cv2
+os.environ["ONMYOJI_DISABLE_DOTENV"] = "1"
+os.environ["ONMYOJI_SKIP_UAC_FOR_TEST"] = "1"
+_real = builtins.__import__
+_blocked = {
+    "win32gui", "win32con", "win32ui", "win32api", "win32process",
+    "pygetwindow", "ultralytics", "torch", "rapidocr_onnxruntime", "llama_cpp",
+}
+def _guarded(name, g=None, l=None, fl=(), lv=0):
+    if name.split(".")[0] in _blocked:
+        raise ModuleNotFoundError(f"Simulated Linux/minimal env missing {name}")
+    return _real(name, g, l, fl, lv)
+builtins.__import__ = _guarded
+sys.platform = "linux"
+sys.path.insert(0, "src")
+from onmyoji_helper.app.bootstrap import run_application
+run_application(["--demo", "--smoke-exit-ms", "800"])
+"""
     proc = subprocess.run(
-        [sys.executable, str(root_dir / "run_app.py"), "--demo", "--smoke-exit-ms", "800"],
+        [sys.executable, "-c", cross_platform_smoke],
         cwd=str(root_dir),
-        env=env,
         capture_output=True,
         text=True,
         timeout=20,
         check=False,
     )
-    # On headless Windows runners without an interactive display server, TclError may occur;
-    # on any desktop session, `--demo --smoke-exit-ms 800` must exit cleanly with code 0!
     if "TclError" not in proc.stderr:
-        assert proc.returncode == 0, f"--demo smoke failed:\nSTDOUT:{proc.stdout}\nSTDERR:{proc.stderr}"
+        assert proc.returncode == 0, f"Cross-platform --demo smoke failed:\n{proc.stderr}"

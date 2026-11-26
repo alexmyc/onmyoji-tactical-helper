@@ -4,10 +4,7 @@ import ctypes
 import logging
 import sys
 import tkinter as tk
-
-import win32con
-import win32gui
-import win32process
+from typing import Any
 
 logger = logging.getLogger("OnmyojiHelper")
 
@@ -16,7 +13,18 @@ WS_EX_TRANSPARENT: int = 0x00000020
 WS_EX_TOOLWINDOW: int = 0x00000080
 WS_EX_NOACTIVATE: int = 0x08000000
 
+win32con: Any = None
+win32gui: Any = None
+win32process: Any = None
+
 if sys.platform == "win32":
+    import win32con as _win32con
+    import win32gui as _win32gui
+    import win32process as _win32process
+
+    win32con = _win32con
+    win32gui = _win32gui
+    win32process = _win32process
     _user32 = ctypes.windll.user32
     _IS_64BIT = ctypes.sizeof(ctypes.c_void_p) == 8
     _LONG_PTR = ctypes.c_ssize_t if _IS_64BIT else ctypes.c_long

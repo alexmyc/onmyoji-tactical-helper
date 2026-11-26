@@ -38,6 +38,7 @@ class AITacticalManager:
     POLL_OPP_TURN: float = 0.35
     POLL_ENTRY_SETTLE: float = 0.20
     POST_DECISION_BUFFER_RANGE: tuple[float, float] = (1.0, 1.5)
+    MAX_TURN_RETRIES: int = 5
     DRAFT_FADE_GRACE_SEC: float = 2.5
     PROVISIONAL_OPENING_DELAY_SEC: float = 3.5
     STEALTH_FALLBACK_DELAY_SEC: float = 5.5
@@ -819,36 +820,44 @@ class AITacticalManager:
                             with self._state_lock:
                                 self.latest_auto_action_text = wait_msg
                         elif self.auto_executor.can_execute_this_turn(now=current_time):
-                            try:
-                                _, action_msg = self.auto_executor.execute_turn_action(
-                                    hwnd=hwnd,
-                                    img_w=screen_w,
-                                    img_h=screen_h,
-                                    active_shiki_name=active_shiki,
-                                    chosen_skill=chosen_skill,
-                                    scope=skill_scope,
-                                    target_slot=rec_slot,
-                                    target_name=rec_name,
-                                    target_is_enemy=target_is_enemy,
-                                    available_skills=skill_states,
-                                    skill_mapping=skill_mapping_snapshot,
-                                    physical_slots=self.turn_detector.PHYSICAL_SLOTS,
-                                    my_status=my_status,
-                                    opp_status=opp_status,
-                                    crop=frame.crop,
-                                    skip_initial_reaction_sleep=True,
+                            if attempts_done > self.MAX_TURN_RETRIES:
+                                reason_msg = (
+                                    f"單回合連續重試達上限 ({self.MAX_TURN_RETRIES} 次)，"
+                                    "疑似畫面無回應，已自動暫停點擊"
                                 )
-                                if action_msg:
-                                    with self._state_lock:
-                                        self.latest_auto_action_text = action_msg
-                                    if self.mode_controller and hasattr(
-                                        self.mode_controller, "update_status_text"
-                                    ):
-                                        self.mode_controller.update_status_text(action_msg)
-                            except Exception as exec_err:
-                                logger.warning(
-                                    f"⚠️ [AutoExecutor] 回合執行異常 (已隔離恢復): {exec_err}", exc_info=True
-                                )
+                                logger.warning(f"🛑 [AutoExecutor] {reason_msg}")
+                                self._handle_emergency_stop(reason_msg)
+                            else:
+                                try:
+                                    _, action_msg = self.auto_executor.execute_turn_action(
+                                        hwnd=hwnd,
+                                        img_w=screen_w,
+                                        img_h=screen_h,
+                                        active_shiki_name=active_shiki,
+                                        chosen_skill=chosen_skill,
+                                        scope=skill_scope,
+                                        target_slot=rec_slot,
+                                        target_name=rec_name,
+                                        target_is_enemy=target_is_enemy,
+                                        available_skills=skill_states,
+                                        skill_mapping=skill_mapping_snapshot,
+                                        physical_slots=self.turn_detector.PHYSICAL_SLOTS,
+                                        my_status=my_status,
+                                        opp_status=opp_status,
+                                        crop=frame.crop,
+                                        skip_initial_reaction_sleep=True,
+                                    )
+                                    if action_msg:
+                                        with self._state_lock:
+                                            self.latest_auto_action_text = action_msg
+                                        if self.mode_controller and hasattr(
+                                            self.mode_controller, "update_status_text"
+                                        ):
+                                            self.mode_controller.update_status_text(action_msg)
+                                except Exception as exec_err:
+                                    logger.warning(
+                                        f"⚠️ [AutoExecutor] 回合執行異常 (已隔離恢復): {exec_err}", exc_info=True
+                                    )
                 else:
                     if self.no_box_start_time == 0.0:
                         self.no_box_start_time = current_time

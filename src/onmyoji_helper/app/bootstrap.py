@@ -16,18 +16,16 @@ import threading
 import time
 import tkinter as tk
 from tkinter import messagebox
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import cv2
 
-from onmyoji_helper.app.battle_coordinator import AITacticalManager
 from onmyoji_helper.app.mode_controller import ModeController
 from onmyoji_helper.decision.draft_engine import build_database, get_recommendation
 from onmyoji_helper.decision.draft_fsm import DraftStateMachine
 from onmyoji_helper.domain.models import DraftPhase
 from onmyoji_helper.domain.shikigami_repository import ShikigamiRepository
 from onmyoji_helper.infra.auth_service import check_activation
-from onmyoji_helper.infra.capture_engine import CaptureEngine
 from onmyoji_helper.infra.env_loader import load_dotenv_if_present
 from onmyoji_helper.infra.logger_setup import setup_runtime_logger
 from onmyoji_helper.infra.sheets_sync_store import (
@@ -43,6 +41,9 @@ from onmyoji_helper.infra.win32_privilege import (
 from onmyoji_helper.ui.demo_sandbox import DemoSandboxWindow
 from onmyoji_helper.ui.main_window import OnmyojiHelperUI
 from onmyoji_helper.vision.draft_ocr_scanner import DraftOcrScanner
+
+if TYPE_CHECKING:
+    from onmyoji_helper.app.battle_coordinator import AITacticalManager
 
 INTERVAL_SLEEP_MODE: float = 2.5
 INTERVAL_BAN_WAIT: float = 0.9
@@ -70,11 +71,13 @@ def _draft_ocr_worker(
     compiled_dbs: dict[str, dict[str, Any]],
     repository: ShikigamiRepository,
     mode_controller: ModeController,
-    tactical_mgr: AITacticalManager,
+    tactical_mgr: "AITacticalManager",
     ui_queue: "queue.Queue[tuple[str | None, list[str], list[str], list[str], list[str], str]]",
     logger: Any,
 ) -> None:
     """Background worker orchestrating GDI capture, `DraftOcrScanner`, and `DraftStateMachine`."""
+    from onmyoji_helper.infra.capture_engine import CaptureEngine
+
     clicker = CaptureEngine()
     scanner = DraftOcrScanner(known_tokens=repository.known_ocr_tokens)
     fsm = DraftStateMachine()
@@ -357,12 +360,6 @@ def run_application(argv: list[str] | None = None) -> None:
         for sys_name, sys_info in systems.items()
     }
 
-    tactical_mgr = AITacticalManager(repository=repository)
-    mode_controller = ModeController(tactical_mgr)
-    ui_queue: queue.Queue[tuple[str | None, list[str], list[str], list[str], list[str], str]] = (
-        queue.Queue()
-    )
-
     root = tk.Tk()
     sandbox_holder: list[DemoSandboxWindow] = []
 
@@ -380,15 +377,13 @@ def run_application(argv: list[str] | None = None) -> None:
         sandbox_holder.clear()
         sandbox_holder.append(win)
 
-    app = OnmyojiHelperUI(
-        root,
-        list(systems.keys()),
-        mode_change_callback=(None if demo_mode else mode_controller.set_mode),
-        sandbox_callback=(open_or_focus_sandbox if is_public_sandbox else None),
-    )
-    mode_controller.set_ui_app(app)
-
     if demo_mode:
+        app = OnmyojiHelperUI(
+            root,
+            list(systems.keys()),
+            mode_change_callback=None,
+            sandbox_callback=open_or_focus_sandbox,
+        )
         logger.info("🧪 [Demo Mode] Interactive Match Sandbox launched (--demo).")
         open_or_focus_sandbox()
         if args.smoke_exit_ms > 0:
@@ -400,6 +395,22 @@ def run_application(argv: list[str] | None = None) -> None:
             root.after(args.smoke_exit_ms, root.destroy)
         root.mainloop()
         return
+
+    from onmyoji_helper.app.battle_coordinator import AITacticalManager
+
+    tactical_mgr = AITacticalManager(repository=repository)
+    mode_controller = ModeController(tactical_mgr)
+    ui_queue: queue.Queue[tuple[str | None, list[str], list[str], list[str], list[str], str]] = (
+        queue.Queue()
+    )
+
+    app = OnmyojiHelperUI(
+        root,
+        list(systems.keys()),
+        mode_change_callback=mode_controller.set_mode,
+        sandbox_callback=(open_or_focus_sandbox if is_public_sandbox else None),
+    )
+    mode_controller.set_ui_app(app)
 
     if is_public_sandbox:
         app.lbl_status.config(

@@ -115,7 +115,7 @@ stateDiagram-v2
     [*] --> Green: Default Startup (0 MB VRAM)
     Green --> Yellow: Click Status Dot (Load YOLOv8n + Gemma-4 / Rule Tier)
     Yellow --> Red: Click Status Dot (Arm SafetyGuard + Restore GA_ROOT Focus)
-    Red --> Yellow: F12/ESC (50 ms Poll) or >95 px Mouse Step Delta (Keep VRAM & HUD)
+    Red --> Yellow: F12 / ESC (<50ms) Emergency Stop or 5-Retry Circuit Breaker (Keep VRAM & HUD)
     Red --> Green: Click Status Dot (Stop Combat Threads & Release CUDA VRAM)
     Yellow --> Green: Close Tactical Panel or Cycle Dot (Release CUDA VRAM)
 ```
@@ -137,7 +137,7 @@ Screen coordinates are translated via `ClientToScreen` and clamped within the in
 - **Skill-First 2-Step Dispatch & `S1` Fallback**: Single-target skills, enemy AoE, and ally AoE execute in **Skill-First → Target-Second** order (**Step 1: Skill Button `S1..S4`** $\to$ **`0.20–0.28s` target-highlight pause** $\to$ **Step 2: Target Unit Coordinate**). When `S2/S3/S4` are unavailable due to insufficient orbs or cooldown, `AutoBattleExecutor` automatically falls back to `[S1]` normal attack on the highest-priority alive enemy unit.
 - **Post-Decision Settle Buffer, Unfinished-Turn Retries & `< 50 ms` Hotkey Override**:
   1. **Post-Decision Settle Buffer (`1.0–1.5s`)**: Once `TurnDetector` (`0.15s` + 2-frame debounce) and the LLM/rule engine lock `(skill, target)`, `AITacticalManager` keeps the HUD Overlay refreshing live for `1.0–1.5s` before dispatching the first click so turn-entry camera zoom and skill-bar pop-in animations settle completely.
-  2. **Unfinished-Turn Retry Loop (`1.2–1.8s`)**: After each `[skill -> target]` dispatch, `SafetyGuard` arms a `1.2–1.8s` retry timer. If `TurnDetector.is_my_turn` remains `True` (indicating an animation transition or cursor bump swallowed the cast), `AutoBattleExecutor` automatically re-dispatches `[skill -> target]` every `1.2–1.8s` until the skill bar closes or emergency override is triggered.
+  2. **Unfinished-Turn Retry Loop (`1.2–1.8s`) & 5-Retry Circuit Breaker (`MAX_TURN_RETRIES = 5`)**: After each `[skill -> target]` dispatch, `SafetyGuard` arms a `1.2–1.8s` retry timer. If `TurnDetector.is_my_turn` remains `True` (indicating an animation transition or cursor bump swallowed the cast), `AutoBattleExecutor` automatically re-dispatches `[skill -> target]` every `1.2–1.8s` up to **`MAX_TURN_RETRIES = 5` consecutive retries** (~`7–8s` window). If the turn still has not resolved after 5 retries (e.g., frozen or disconnected client), `AITacticalManager` trips the circuit breaker, halts input dispatch, and downgrades automatically to Yellow Mode.
   3. **`50 ms` `F12` / `ESC` Emergency Override (`SafetyGuard`)**: `RedModeKillSwitch` polls `F12` and `ESC` via `GetAsyncKeyState` every **`50 ms`**, setting `stop_event`, incrementing `ModeController._transition_epoch`, and immediately downgrading to passive Yellow Mode without unloading pre-warmed models.
 
 ---
@@ -159,3 +159,25 @@ Screen coordinates are translated via `ClientToScreen` and clamped within the in
 1. **Sequential Low-RAM Cython 3.3 Compilation**: Discovers all **33 modules** under `src/onmyoji_helper/` and compiles each inside an isolated child process (`--workers 1` default) into native Windows `.pyd` C-extensions with `docstrings=False`, `binding=False`, `c_line_in_traceback=False`, `emit_code_comments=False`, MSVC `/O2 /DNDEBUG`, and `/DEBUG:NONE` symbol stripping for source obfuscation and distribution hygiene.
 2. **Credential-Free Default Packaging**: Packages `OnmyojiHelper.exe` with `--onedir --windowed --uac-admin --contents-directory=data`, embedding the Windows `requireAdministrator` PE `RT_MANIFEST` and copying `.env.example` (never `.env` unless `--include-local-env` is explicitly passed) alongside local model weights.
 3. **Automated Post-Build Hygiene Audit**: Verifies root directory cleanliness (`['OnmyojiHelper.exe', 'data']`), `requireAdministrator` manifest presence, `33/33` `.pyd` module completeness, **zero `.py` source files**, and **zero accidental `.env` bundling** in default builds.
+
+---
+
+## 7. Engineering Standards Alignment & Multi-Tier Test Governance
+
+### 7.1 `ISO/IEC 25010` Software Product Quality & `ISO/IEC 27001` Security Mapping
+
+| Standard / Characteristic | Architectural Realization & Verifiable Control |
+| :--- | :--- |
+| **ISO/IEC 25010 — Functional Suitability** | Unidirectional **7-layer dependency graph** decoupling symbolic XMind counter-trees, `DraftStateMachine`, and `TargetSelector` from Win32 GDI/SendInput and Tkinter bindings. |
+| **ISO/IEC 25010 — Performance Efficiency** | Sub-`4 ms` deterministic frame-to-HUD pipeline (`P50 = 3.193 ms`), `120×80` `INTER_AREA` motion-diff OCR gating, `BELOW_NORMAL_PRIORITY_CLASS`, and `1–2` thread OpenMP/BLAS caps. |
+| **ISO/IEC 25010 — Reliability & Fault Tolerance** | Deterministic `is_my_turn` skill-bar baseline calibration, `< 50 ms` `F12`/`ESC` kill-switch, `MAX_TURN_RETRIES = 5` circuit-breaker downgrade, `S1` orb-shortage fallback, and 0-VRAM rule-engine fallback. |
+| **ISO/IEC 25010 — Maintainability & Portability** | `Ruff` + `Mypy` static verification across 41 source files, zero import-time side effects, and cross-platform Windows/Linux `--demo` interactive sandbox. |
+| **ISO/IEC 27001 & OWASP — Credential Isolation** | Untracked `.env` boundary, credential-free default packaging (`build_release.py`), conditional least-privilege UAC elevation, and `%LOCALAPPDATA%` XOR cache obfuscation (see [SECURITY.md](../SECURITY.md)). |
+
+### 7.2 `ISO/IEC/IEEE 29119` Five-Tier Software Testing Strategy
+
+1. **Tier 1 — Deterministic Domain & Symbolic Unit Suite** (`test_draft_engine.py`, `test_draft_fsm.py`, `test_repository_and_action_bar.py`, `test_coordinate_mapper.py`, `test_target_and_executor.py`): Verifies XMind dead-branch viability decay, mirror-match detection, Opening/Post-5-Pick Extra Bans, `125%` DWM DPI projection, and skill-first dispatch ordering.
+2. **Tier 2 — Noisy Synthetic Computer Vision Regression** (`test_vision_synthetic_regression.py`): Injects `±4 px` Gaussian bounding-box jitter, single-frame dropouts, `3.0s` ultimate occlusion blackouts, full-screen flashbang washouts, and `540p / 720p / 1080p` OCR crops with 2-frame temporal consistency gating.
+3. **Tier 3 — Battle Lifecycle & Circuit-Breaker Integration** (`test_battle_lifecycle_and_red_loop.py`): Validates pre-draft window gating, immunity against tilted pre-emptive animation pauses until `is_my_turn == True`, enemy-first provisional tracking + mandatory first-turn recalibration, and `MAX_TURN_RETRIES = 5` auto-downgrade protection.
+4. **Tier 4 — End-to-End Frame Pipeline & Cross-Platform `--demo` Smoke** (`test_e2e_pipeline.py`, `test_dual_track_and_demo.py`): Exercises the full `1280×720` synthetic frame-to-HUD pipeline and runs `run_app.py --demo` in a simulated Linux / zero-Win32 / zero-GPU subprocess.
+5. **Tier 5 — Clean-Environment Headless CI Gate** (`.github/workflows/ci.yml`): Executes `Ruff`, `Mypy`, and `Pytest` (`>= 70%` core coverage gate) on clean GitHub Actions runners without `.env`, `best.pt`, `ultralytics`, `torch`, `rapidocr`, or `llama_cpp`.
